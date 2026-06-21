@@ -1,65 +1,207 @@
-import Image from "next/image";
+"use client";
+
+import { useState } from "react";
+import type { EntityType, InvestigationResult } from "@/lib/osint/types";
+import { Results } from "@/components/Results";
+
+type Mode = "text" | "form";
+
+interface FormState {
+  name: string;
+  email: string;
+  username: string;
+  domain: string;
+  ip: string;
+  phone: string;
+  notes: string;
+}
+
+const EMPTY: FormState = {
+  name: "",
+  email: "",
+  username: "",
+  domain: "",
+  ip: "",
+  phone: "",
+  notes: "",
+};
+
+// which form fields map to which seed type (notes excluded — never queried)
+const FIELD_TYPE: Record<keyof Omit<FormState, "notes">, EntityType> = {
+  name: "name",
+  email: "email",
+  username: "username",
+  domain: "domain",
+  ip: "ip",
+  phone: "phone",
+};
+
+const FIELDS: { key: keyof Omit<FormState, "notes">; label: string; ph: string }[] = [
+  { key: "name", label: "Full name(s)", ph: "Jane Doe" },
+  { key: "email", label: "Email(s)", ph: "jane@example.com" },
+  { key: "username", label: "Username(s)", ph: "jdoe_88" },
+  { key: "domain", label: "Domain(s)", ph: "example.com" },
+  { key: "ip", label: "IP address(es)", ph: "8.8.8.8" },
+  { key: "phone", label: "Phone(s)", ph: "+1 555 0100" },
+];
+
+function splitValues(s: string): string[] {
+  return s
+    .split(/[\n,]+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
 
 export default function Home() {
+  const [mode, setMode] = useState<Mode>("text");
+  const [query, setQuery] = useState("");
+  const [form, setForm] = useState<FormState>(EMPTY);
+  const [files, setFiles] = useState<File[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<InvestigationResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  function buildSeeds() {
+    const seeds: { type: EntityType; value: string }[] = [];
+    for (const { key } of FIELDS) {
+      for (const v of splitValues(form[key])) seeds.push({ type: FIELD_TYPE[key], value: v });
+    }
+    return seeds;
+  }
+
+  async function run() {
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const fd = new FormData();
+      if (mode === "text") fd.set("query", query);
+      else fd.set("seeds", JSON.stringify(buildSeeds()));
+      for (const f of files) fd.append("images", f, f.name);
+      const res = await fetch("/api/investigate", { method: "POST", body: fd });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Request failed");
+      setResult(json as InvestigationResult);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+    <main className="mx-auto max-w-5xl px-4 py-8">
+      <header className="mb-5 flex items-baseline justify-between border-b border-border pb-3">
+        <h1 className="text-sm font-semibold tracking-[0.2em] uppercase">
+          OSINT<span className="text-muted">/</span>Directory
+        </h1>
+        <span className="text-[10px] uppercase tracking-widest text-muted">public-source recon</span>
+      </header>
+
+      {/* mode switch */}
+      <div className="mb-3 flex gap-1">
+        {(["text", "form"] as Mode[]).map((m) => (
+          <button
+            key={m}
+            onClick={() => setMode(m)}
+            className={`rounded-sm border px-3 py-1 text-[11px] uppercase tracking-wider transition ${
+              mode === m ? "border-foreground text-foreground" : "border-border text-muted hover:text-foreground"
+            }`}
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+            {m === "text" ? "quick text" : "structured form"}
+          </button>
+        ))}
+      </div>
+
+      <form
+        className="rounded-md border border-border bg-panel"
+        onSubmit={(e) => {
+          e.preventDefault();
+          run();
+        }}
+      >
+        {mode === "text" ? (
+          <textarea
+            suppressHydrationWarning
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") run();
+            }}
+            rows={4}
+            spellCheck={false}
+            placeholder={"jane.doe@example.com   ·   example.com   ·   8.8.8.8   ·   jdoe_88   ·   Jane Doe"}
+            className="w-full resize-y bg-transparent p-3 text-xs leading-relaxed outline-none placeholder:text-muted/50"
+          />
+        ) : (
+          <div className="grid grid-cols-1 gap-px bg-border sm:grid-cols-2">
+            {FIELDS.map(({ key, label, ph }) => (
+              <label key={key} className="block bg-panel p-3">
+                <span className="text-[9px] uppercase tracking-[0.18em] text-muted">{label}</span>
+                <input
+                  suppressHydrationWarning
+                  value={form[key]}
+                  onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
+                  placeholder={ph}
+                  spellCheck={false}
+                  className="mt-1 w-full bg-transparent text-xs outline-none placeholder:text-muted/40"
+                />
+              </label>
+            ))}
+            <label className="block bg-panel p-3 sm:col-span-2">
+              <span className="text-[9px] uppercase tracking-[0.18em] text-muted">
+                Notes (not queried)
+              </span>
+              <textarea
+                suppressHydrationWarning
+                value={form.notes}
+                onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
+                rows={2}
+                placeholder="context, case ref, hypotheses…"
+                className="mt-1 w-full resize-y bg-transparent text-xs outline-none placeholder:text-muted/40"
+              />
+            </label>
+          </div>
+        )}
+
+        <div className="flex items-center gap-3 border-t border-border px-3 py-2">
+          <label className="cursor-pointer text-[11px] uppercase tracking-wider text-muted hover:text-foreground">
+            + images
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={(e) => setFiles(Array.from(e.target.files || []))}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+          </label>
+          {files.length > 0 && (
+            <span className="truncate text-[11px] text-muted">{files.length} file(s)</span>
+          )}
+          <span className="ml-auto text-[10px] text-muted/60">multiple values: comma / newline</span>
+          <button
+            type="submit"
+            disabled={loading}
+            className="rounded-sm bg-foreground px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-black transition disabled:opacity-25"
           >
-            Documentation
-          </a>
+            {loading ? "scanning" : "run"}
+          </button>
         </div>
-      </main>
-    </div>
+      </form>
+
+      <p className="mt-2 text-[10px] leading-relaxed text-muted">
+        Authorized use only · free public sources (RDAP · DNS · crt.sh · Gravatar · cert logs ·
+        public profiles) · no login-gated scraping · race/ethnicity & other sensitive traits not
+        inferred.
+      </p>
+
+      {error && (
+        <div className="mt-5 rounded-md border border-border bg-panel-2 px-3 py-2 text-xs text-foreground">
+          ✕ {error}
+        </div>
+      )}
+
+      {result && <Results result={result} />}
+    </main>
   );
 }
