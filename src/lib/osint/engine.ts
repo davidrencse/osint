@@ -47,7 +47,7 @@ import exif from "./sources/exif";
 import dorks from "./sources/dorks";
 import breach from "./sources/breach";
 import social from "./sources/social";
-import geovision from "./sources/geovision";
+import geocode from "./sources/geocode";
 
 export const SOURCES: Source[] = [
   dns,
@@ -59,7 +59,7 @@ export const SOURCES: Source[] = [
   usernameEnum,
   social,
   exif,
-  geovision,
+  geocode,
   dorks,
   breach,
 ];
@@ -79,10 +79,6 @@ function keysFromEnv(): Record<string, string | undefined> {
     HIBP_API_KEY: process.env.HIBP_API_KEY,
     SHODAN_API_KEY: process.env.SHODAN_API_KEY,
     HUNTER_API_KEY: process.env.HUNTER_API_KEY,
-    // On Vercel the AI Gateway authorizes via the OIDC token automatically —
-    // no explicit key needed. Treat OIDC presence as "key available".
-    AI_GATEWAY_API_KEY:
-      process.env.AI_GATEWAY_API_KEY || (process.env.VERCEL_OIDC_TOKEN ? "oidc" : undefined),
   };
 }
 
