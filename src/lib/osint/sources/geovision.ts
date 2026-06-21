@@ -14,9 +14,10 @@ Determine WHERE this photograph was most likely taken using only visible content
 - Natural: vegetation, climate, terrain, soil, sun position/shadows
 - Symbols: flags, emblems, brands with regional presence
 Commit to the single most likely location with its lat/lon (city/landmark center if street-level is uncertain).
+Also transcribe ALL readable text (signs, labels) and list any named, searchable places/businesses/landmarks.
 Do NOT identify specific private individuals.
 Respond with ONLY a JSON object, no prose, no code fences:
-{"geolocatable":bool,"city":string|null,"region":string|null,"country":string|null,"lat":number|null,"lon":number|null,"confidence":number,"reasoning":string,"clues":string[],"alternatives":[{"place":string,"lat":number|null,"lon":number|null}]}`;
+{"geolocatable":bool,"city":string|null,"region":string|null,"country":string|null,"lat":number|null,"lon":number|null,"confidence":number,"reasoning":string,"clues":string[],"visibleText":string[],"landmarks":string[],"alternatives":[{"place":string,"lat":number|null,"lon":number|null}]}`;
 
 interface GeoOut {
   geolocatable?: boolean;
@@ -28,6 +29,8 @@ interface GeoOut {
   confidence?: number;
   reasoning?: string;
   clues?: string[];
+  visibleText?: string[];
+  landmarks?: string[];
   alternatives?: { place: string; lat: number | null; lon: number | null }[];
 }
 
@@ -85,6 +88,11 @@ const geovisionSource: Source = {
         entities.push(point(alt.place, alt.lat, alt.lon, "alternative estimate", 0.3));
       }
     }
+    // feed named landmarks/businesses back into the pipeline (geocode -> map)
+    for (const lm of o.landmarks || []) {
+      const v = String(lm).trim();
+      if (v.length > 2) entities.push(entity("location", v, "geovision", 0.6, { label: "landmark in photo" }));
+    }
 
     return [
       {
@@ -101,6 +109,8 @@ const geovisionSource: Source = {
           confidence: conf,
           reasoning: o.reasoning,
           clues: o.clues,
+          visibleText: o.visibleText,
+          landmarks: o.landmarks,
           alternatives: (o.alternatives || []).map((a) => a.place),
           model: cfg.model,
           note: "AI inference from image content — verify before relying on it.",
