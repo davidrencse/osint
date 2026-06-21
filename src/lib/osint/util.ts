@@ -63,6 +63,20 @@ export async function safeFetch(
   }
 }
 
+export function imageMediaType(name: string): string {
+  const ext = name.toLowerCase().split(".").pop() || "";
+  return (
+    {
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      png: "image/png",
+      webp: "image/webp",
+      gif: "image/gif",
+      bmp: "image/bmp",
+    }[ext] || "image/jpeg"
+  );
+}
+
 export async function md5Hex(input: string): Promise<string> {
   // Node crypto (server side)
   const { createHash } = await import("node:crypto");

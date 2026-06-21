@@ -81,7 +81,8 @@ function keysFromEnv(): Record<string, string | undefined> {
     HIBP_API_KEY: process.env.HIBP_API_KEY,
     SHODAN_API_KEY: process.env.SHODAN_API_KEY,
     HUNTER_API_KEY: process.env.HUNTER_API_KEY,
-    GROQ_API_KEY: process.env.GROQ_API_KEY,
+    // Vision provider key — VISION_API_KEY wins, GROQ_API_KEY is the default fallback.
+    VISION_API_KEY: process.env.VISION_API_KEY || process.env.GROQ_API_KEY,
   };
 }
 
