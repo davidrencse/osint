@@ -17,30 +17,23 @@ const STYLE = {
     },
   },
   layers: [
-    { id: "bg", type: "background" as const, paint: { "background-color": "#000000" } },
+    { id: "bg", type: "background" as const, paint: { "background-color": "#1a1a1a" } },
     {
       id: "water",
       type: "fill" as const,
       source: "openmaptiles",
       "source-layer": "water",
-      paint: { "fill-color": "#070707" },
-    },
-    {
-      id: "landuse",
-      type: "fill" as const,
-      source: "openmaptiles",
-      "source-layer": "landcover",
-      paint: { "fill-color": "#0c0c0c", "fill-opacity": 0.6 },
+      paint: { "fill-color": "#0d0d0d" },
     },
     {
       id: "roads",
       type: "line" as const,
       source: "openmaptiles",
       "source-layer": "transportation",
-      minzoom: 6,
+      minzoom: 7,
       paint: {
-        "line-color": "#1f1f1f",
-        "line-width": ["interpolate", ["linear"], ["zoom"], 6, 0.3, 16, 2.2],
+        "line-color": "#3a3a3a",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 7, 0.4, 16, 2.4],
       },
     },
     {
@@ -55,17 +48,17 @@ const STYLE = {
           ["linear"],
           ["get", "render_height"],
           0,
-          "#262626",
+          "#4a4a4a",
           40,
-          "#3a3a3a",
+          "#666666",
           120,
-          "#565656",
+          "#888888",
           300,
-          "#7a7a7a",
+          "#aaaaaa",
         ],
         "fill-extrusion-height": ["get", "render_height"],
         "fill-extrusion-base": ["get", "render_min_height"],
-        "fill-extrusion-opacity": 0.9,
+        "fill-extrusion-opacity": 0.92,
       },
     },
   ],
@@ -75,7 +68,7 @@ export function MapView({ points }: { points: GeoPoint[] }) {
   const ref = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mapRef = useRef<any>(null);
-  const [globe, setGlobe] = useState(true);
+  const [globe, setGlobe] = useState(false); // flat mercator loads faster; globe is opt-in
 
   useEffect(() => {
     if (!ref.current || mapRef.current) return;
@@ -90,16 +83,13 @@ export function MapView({ points }: { points: GeoPoint[] }) {
         style: STYLE as unknown as StyleSpecification,
         center: points[0] ? [points[0].lon, points[0].lat] : [0, 20],
         zoom: points[0] ? 4 : 1.4,
-        pitch: 50, // tilt so 3D buildings read like Google Earth
         attributionControl: false,
         maxPitch: 85,
+        fadeDuration: 0, // skip tile cross-fade for snappier loads
+        refreshExpiredTiles: false,
       });
       mapRef.current = map;
       map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
-
-      map.on("style.load", () => {
-        map.setProjection({ type: "globe" });
-      });
 
       map.on("load", () => {
         const bounds = new maplibregl.LngLatBounds();
@@ -153,7 +143,7 @@ export function MapView({ points }: { points: GeoPoint[] }) {
     <div className="relative overflow-hidden rounded-md border border-border">
       <div
         ref={ref}
-        className="h-[460px] w-full bg-black [filter:grayscale(1)_contrast(1.15)_brightness(1.05)]"
+        className="h-[460px] w-full bg-neutral-900 [filter:grayscale(1)_contrast(1.02)_brightness(1.3)]"
       />
       <div className="absolute left-3 top-3 z-10 flex gap-1">
         <button
