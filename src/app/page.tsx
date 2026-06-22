@@ -60,6 +60,21 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<InvestigationResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  function addFiles(list: FileList | File[] | null | undefined) {
+    if (!list) return;
+    const imgs = Array.from(list).filter((f) => f.type.startsWith("image/"));
+    if (!imgs.length) return;
+    setFiles((prev) => {
+      const seen = new Set(prev.map((f) => f.name + ":" + f.size));
+      return [...prev, ...imgs.filter((f) => !seen.has(f.name + ":" + f.size))];
+    });
+  }
+
+  function removeFile(i: number) {
+    setFiles((prev) => prev.filter((_, idx) => idx !== i));
+  }
 
   function buildSeeds() {
     const seeds: { type: EntityType; value: string }[] = [];
@@ -114,12 +129,32 @@ export default function Home() {
       </div>
 
       <form
-        className="rounded-md border border-border bg-panel"
+        className={`relative rounded-md border bg-panel transition ${
+          dragging ? "border-foreground ring-1 ring-foreground" : "border-border"
+        }`}
         onSubmit={(e) => {
           e.preventDefault();
           run();
         }}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={(e) => {
+          if (e.currentTarget === e.target) setDragging(false);
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragging(false);
+          addFiles(e.dataTransfer.files);
+        }}
+        onPaste={(e) => addFiles(e.clipboardData?.files)}
       >
+        {dragging && (
+          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-md bg-black/70 text-xs uppercase tracking-widest text-foreground">
+            drop images to add
+          </div>
+        )}
         {mode === "text" ? (
           <textarea
             suppressHydrationWarning
@@ -164,20 +199,47 @@ export default function Home() {
           </div>
         )}
 
+        {files.length > 0 && (
+          <div className="flex flex-wrap gap-2 border-t border-border px-3 py-2">
+            {files.map((f, i) => (
+              <span
+                key={f.name + i}
+                className="group relative flex items-center gap-1.5 rounded-sm border border-border bg-panel-2 py-1 pl-1 pr-2 text-[11px]"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={URL.createObjectURL(f)}
+                  alt=""
+                  className="h-6 w-6 rounded-[2px] object-cover grayscale"
+                />
+                <span className="max-w-[120px] truncate text-muted">{f.name}</span>
+                <button
+                  type="button"
+                  onClick={() => removeFile(i)}
+                  className="text-muted hover:text-foreground"
+                  aria-label="remove"
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
         <div className="flex items-center gap-3 border-t border-border px-3 py-2">
           <label className="cursor-pointer text-[11px] uppercase tracking-wider text-muted hover:text-foreground">
-            + images
+            + images / drag · drop · paste
             <input
               type="file"
               accept="image/*"
               multiple
               className="hidden"
-              onChange={(e) => setFiles(Array.from(e.target.files || []))}
+              onChange={(e) => {
+                addFiles(e.target.files);
+                e.target.value = "";
+              }}
             />
           </label>
-          {files.length > 0 && (
-            <span className="truncate text-[11px] text-muted">{files.length} file(s)</span>
-          )}
           <span className="ml-auto text-[10px] text-muted/60">multiple values: comma / newline</span>
           <button
             type="submit"
