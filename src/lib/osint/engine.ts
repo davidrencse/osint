@@ -50,6 +50,7 @@ import social from "./sources/social";
 import geocode from "./sources/geocode";
 import geovision from "./sources/geovision";
 import reverseImage from "./sources/reverse";
+import faces from "./sources/faces";
 
 export const SOURCES: Source[] = [
   dns,
@@ -62,6 +63,7 @@ export const SOURCES: Source[] = [
   social,
   exif,
   geovision,
+  faces,
   reverseImage,
   geocode,
   dorks,

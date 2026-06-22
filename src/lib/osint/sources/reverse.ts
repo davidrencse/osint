@@ -11,7 +11,7 @@ import { imageMediaType, safeFetch } from "../util";
 
 const q = (s: string) => encodeURIComponent(s);
 
-async function hostImage(buf: Buffer, name: string, signal?: AbortSignal): Promise<string | null> {
+export async function hostImage(buf: Buffer, name: string, signal?: AbortSignal): Promise<string | null> {
   try {
     const fd = new FormData();
     fd.append("reqtype", "fileupload");
