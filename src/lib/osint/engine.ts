@@ -1,99 +1,53 @@
 import type {
   Entity,
   Finding,
-  GeoPoint,
-  InvestigationResult,
-  SeedInput,
+  GeolocateResult,
   Source,
   SourceContext,
 } from "./types";
 
-/** Pull lat/lon out of location entities (meta coords or "lat, lon" value). */
-function collectGeo(entities: Entity[]): GeoPoint[] {
-  const out: GeoPoint[] = [];
-  const seen = new Set<string>();
-  for (const e of entities) {
-    if (e.type !== "location") continue;
-    const m = e.meta as { lat?: number; lon?: number } | undefined;
-    let lat = m?.lat;
-    let lon = m?.lon;
-    if (lat == null || lon == null) {
-      const mt = /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/.exec(e.value);
-      if (mt) {
-        lat = parseFloat(mt[1]);
-        lon = parseFloat(mt[2]);
-      }
-    }
-    if (typeof lat !== "number" || typeof lon !== "number" || Number.isNaN(lat) || Number.isNaN(lon))
-      continue;
-    const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ lat, lon, label: e.value, source: e.source, confidence: e.confidence });
-  }
-  return out;
-}
-import { entity as makeEntity, isValidEntity } from "./util";
-import { buildSubject } from "./profile";
+import { buildGeo, attachElevation } from "./geo";
+import { entity as makeEntity, isValidEntity, createLimiter } from "./util";
 
-import dns from "./sources/dns";
-import rdap from "./sources/rdap";
-import crtsh from "./sources/crtsh";
-import ipgeo from "./sources/ipgeo";
-import gravatar from "./sources/gravatar";
-import emailAnalyze from "./sources/email";
-import usernameEnum from "./sources/username";
 import exif from "./sources/exif";
-import dorks from "./sources/dorks";
-import breach from "./sources/breach";
-import social from "./sources/social";
-import geocode from "./sources/geocode";
 import geovision from "./sources/geovision";
-import reverseImage from "./sources/reverse";
+import ocr from "./sources/ocr";
+import scene from "./sources/scene";
+import refine from "./sources/refine";
+import geocode from "./sources/geocode";
+import reverse from "./sources/reverse";
+import instagram from "./sources/instagram";
 import faces from "./sources/faces";
 
-export const SOURCES: Source[] = [
-  dns,
-  rdap,
-  crtsh,
-  ipgeo,
-  gravatar,
-  emailAnalyze,
-  usernameEnum,
-  social,
-  exif,
-  geovision,
-  faces,
-  reverseImage,
-  geocode,
-  dorks,
-  breach,
-];
+// Geolocation runs as layered, independent detectors that fuse in geo.ts, in a
+// coarse → fine cascade:
+//   1. exif      — embedded GPS + IPTC/XMP place tags (metadata)
+//   2. geovision — holistic AI visual estimate + landmarks + camera geometry
+//   3. ocr       — sign/text extraction → geocodable place queries
+//   4. scene     — background architecture/biome/driving-side → region
+//   5. geocode   — resolves named places from layers 1–4 into coordinates
+//   6. refine    — second AI pass seeded with the coarse area → exact spot
+// reverse + instagram add corroboration links; faces is attribute-only.
+export const SOURCES: Source[] = [exif, geovision, ocr, scene, refine, geocode, reverse, instagram, faces];
 
-const MAX_PIVOT_ENTITIES = 40; // cap second-pass fan-out
+// Global cap on concurrent source runs so a multi-image upload doesn't fan out
+// into hundreds of simultaneous outbound fetches.
+const MAX_CONCURRENT_RUNS = 12;
 
 export interface RunOptions {
   /** filename -> buffer for uploaded images */
-  images?: Record<string, Buffer>;
-  /** disable expensive pivoting */
-  pivot?: boolean;
+  images: Record<string, Buffer>;
   signal?: AbortSignal;
 }
 
 function keysFromEnv(): Record<string, string | undefined> {
   return {
-    HIBP_API_KEY: process.env.HIBP_API_KEY,
-    SHODAN_API_KEY: process.env.SHODAN_API_KEY,
-    HUNTER_API_KEY: process.env.HUNTER_API_KEY,
     // Vision provider key — VISION_API_KEY wins, GROQ_API_KEY is the default fallback.
     VISION_API_KEY: process.env.VISION_API_KEY || process.env.GROQ_API_KEY,
   };
 }
 
-export async function investigate(
-  seeds: SeedInput[],
-  opts: RunOptions = {},
-): Promise<InvestigationResult> {
+export async function geolocate(opts: RunOptions): Promise<GeolocateResult> {
   const startedAt = new Date();
   const ctx: SourceContext = {
     keys: keysFromEnv(),
@@ -103,73 +57,64 @@ export async function investigate(
 
   const entities = new Map<string, Entity>();
   const findings: Finding[] = [];
-  const errors: InvestigationResult["errors"] = [];
-  const skipped: InvestigationResult["skipped"] = [];
+  const errors: GeolocateResult["errors"] = [];
+  const skipped: GeolocateResult["skipped"] = [];
 
-  // seed entities
-  for (const s of seeds) {
-    const e = makeEntity(s.type, s.value, "input", 1.0);
-    entities.set(e.id, e);
-  }
   // image entities from uploads
-  for (const fname of Object.keys(opts.images || {})) {
+  for (const fname of Object.keys(opts.images)) {
     const e = makeEntity("image", fname, "input", 1.0);
     entities.set(e.id, e);
   }
 
   const ran = new Set<string>(); // `${sourceId}::${entityId}` dedupe
+  const limit = createLimiter(MAX_CONCURRENT_RUNS);
+  const pending = new Set<Promise<void>>();
 
-  async function dispatch(targets: Entity[]) {
-    const jobs: Promise<void>[] = [];
-    for (const ent of targets) {
-      for (const src of SOURCES) {
-        if (!src.handles.includes(ent.type)) continue;
-        const tag = `${src.id}::${ent.id}`;
-        if (ran.has(tag)) continue;
-        ran.add(tag);
+  // Reactive dispatch: the moment a source emits a new entity we schedule its
+  // downstream sources immediately — no barrier. So fast EXIF place tags get
+  // geocoded while the slow AI vision call is still in flight, and the leaf
+  // reverse-image upload never blocks the map-producing path.
+  function schedule(ent: Entity) {
+    for (const src of SOURCES) {
+      if (!src.handles.includes(ent.type)) continue;
+      const tag = `${src.id}::${ent.id}`;
+      if (ran.has(tag)) continue;
+      ran.add(tag);
 
-        if (src.requiresKey && !ctx.keys[src.requiresKey]) {
-          skipped.push({ source: src.label, key: src.requiresKey });
-          continue;
-        }
-        jobs.push(
-          src
-            .run(ent, ctx)
-            .then((fs) => {
-              for (const f of fs) {
-                findings.push(f);
-                for (const ne of f.entities || []) {
-                  if (!isValidEntity(ne)) continue;
-                  if (!entities.has(ne.id)) entities.set(ne.id, ne);
-                }
-              }
-            })
-            .catch((err: unknown) => {
-              errors.push({
-                source: src.id,
-                entity: ent.id,
-                message: err instanceof Error ? err.message : String(err),
-              });
-            }),
-        );
+      if (src.requiresKey && !ctx.keys[src.requiresKey]) {
+        skipped.push({ source: src.label, key: src.requiresKey });
+        continue;
       }
+
+      const job = limit(() => src.run(ent, ctx))
+        .then((fs) => {
+          for (const f of fs) {
+            findings.push(f);
+            for (const ne of f.entities || []) {
+              if (!isValidEntity(ne)) continue;
+              if (!entities.has(ne.id)) {
+                entities.set(ne.id, ne);
+                schedule(ne); // feed discoveries back in immediately
+              }
+            }
+          }
+        })
+        .catch((err: unknown) => {
+          errors.push({
+            source: src.id,
+            entity: ent.id,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        });
+
+      pending.add(job);
+      job.finally(() => pending.delete(job));
     }
-    await Promise.all(jobs);
   }
 
-  // pass 1: seeds
-  const seedEntities = [...entities.values()];
-  await dispatch(seedEntities);
-
-  // pass 2: pivot on newly discovered entities (one level deep)
-  if (opts.pivot !== false) {
-    const seedIds = new Set(seedEntities.map((e) => e.id));
-    const discovered = [...entities.values()]
-      .filter((e) => !seedIds.has(e.id))
-      .filter((e) => e.confidence >= 0.6)
-      .slice(0, MAX_PIVOT_ENTITIES);
-    await dispatch(discovered);
-  }
+  for (const ent of [...entities.values()]) schedule(ent);
+  // Drain: schedule() may add new jobs while we await, so loop until quiescent.
+  while (pending.size) await Promise.allSettled([...pending]);
 
   // dedupe skipped
   const seenSkip = new Set<string>();
@@ -180,14 +125,22 @@ export async function investigate(
     return true;
   });
 
-  const finishedAt = new Date();
   const entityList = [...entities.values()].sort((a, b) => b.confidence - a.confidence);
+  const geo = buildGeo(entityList);
+  // Enrich fused points with ground elevation (best-effort, one batched call).
+  await attachElevation(geo, opts.signal);
+
+  const finishedAt = new Date();
   return {
-    query: seeds,
-    subject: buildSubject(entityList, findings),
-    geo: collectGeo(entityList),
+    images: Object.keys(opts.images),
+    geo,
     entities: entityList,
-    findings,
+    // Strip each finding's `entities`: they exist only to feed the engine's
+    // reactive pivoting (schedule()), are a full duplicate of the entities
+    // already returned at top level (with their meta), and are never read by the
+    // client — shipping them just bloats the response JSON.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    findings: findings.map(({ entities, ...f }) => f),
     skipped: skippedUniq,
     errors,
     startedAt: startedAt.toISOString(),

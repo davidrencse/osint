@@ -1,27 +1,6 @@
-// Core OSINT engine types
+// Core types for the Image Geolocator engine
 
-export type EntityType =
-  | "email"
-  | "username"
-  | "domain"
-  | "ip"
-  | "url"
-  | "name"
-  | "phone"
-  | "person"
-  | "image"
-  | "location"
-  | "breach"
-  | "social_profile"
-  | "certificate"
-  | "dns_record"
-  | "organization"
-  | "age"
-  | "birthdate"
-  | "education"
-  | "employer"
-  | "avatar"
-  | "unknown";
+export type EntityType = "image" | "location" | "unknown";
 
 export type Severity = "info" | "low" | "medium" | "high";
 
@@ -69,34 +48,8 @@ export interface Source {
   run(entity: Entity, ctx: SourceContext): Promise<Finding[]>;
 }
 
-export interface Attr {
-  value: string;
-  source: string;
-  confidence: number;
-  label?: string;
-}
-
-export interface Subject {
-  primaryName?: Attr;
-  names: Attr[];
-  usernames: Attr[];
-  emails: Attr[];
-  phones: Attr[];
-  age?: Attr;
-  birthdate?: Attr;
-  residence?: Attr;
-  locations: Attr[];
-  education: Attr[];
-  employers: Attr[];
-  organizations: Attr[];
-  socials: Attr[];
-  avatars: string[];
-  breaches: Attr[];
-  domains: Attr[];
-  ips: Attr[];
-  /** sensitive attributes deliberately not inferred */
-  excluded: string[];
-}
+/** precision class of a geo point — drives map marker style + accuracy ring */
+export type GeoKind = "gps" | "estimate" | "geocoded";
 
 export interface GeoPoint {
   lat: number;
@@ -104,11 +57,21 @@ export interface GeoPoint {
   label: string;
   source: string;
   confidence: number;
+  /** precision class */
+  kind?: GeoKind;
+  /** approximate accuracy radius in km (larger = coarser) */
+  radiusKm?: number;
+  /** how many independent sources agree on this location after fusion */
+  corroboration?: number;
+  /** labels of the sources that agree */
+  sources?: string[];
+  /** ground elevation above sea level (metres) at this point, from a DEM lookup */
+  elevationM?: number;
 }
 
-export interface InvestigationResult {
-  query: SeedInput[];
-  subject: Subject;
+export interface GeolocateResult {
+  /** uploaded filenames analyzed this run */
+  images: string[];
   geo: GeoPoint[];
   entities: Entity[];
   findings: Finding[];
@@ -118,10 +81,4 @@ export interface InvestigationResult {
   startedAt: string;
   finishedAt: string;
   durationMs: number;
-}
-
-export interface SeedInput {
-  raw: string;
-  type: EntityType;
-  value: string;
 }

@@ -1,66 +1,86 @@
 "use client";
 
-import { useState } from "react";
-import type { EntityType, InvestigationResult } from "@/lib/osint/types";
+import { useState, useMemo, useEffect } from "react";
+import type { GeolocateResult } from "@/lib/osint/types";
 import { Results } from "@/components/Results";
 
-type Mode = "text" | "form";
-
-interface FormState {
-  name: string;
-  email: string;
-  username: string;
-  domain: string;
-  ip: string;
-  phone: string;
-  notes: string;
-}
-
-const EMPTY: FormState = {
-  name: "",
-  email: "",
-  username: "",
-  domain: "",
-  ip: "",
-  phone: "",
-  notes: "",
-};
-
-// which form fields map to which seed type (notes excluded — never queried)
-const FIELD_TYPE: Record<keyof Omit<FormState, "notes">, EntityType> = {
-  name: "name",
-  email: "email",
-  username: "username",
-  domain: "domain",
-  ip: "ip",
-  phone: "phone",
-};
-
-const FIELDS: { key: keyof Omit<FormState, "notes">; label: string; ph: string }[] = [
-  { key: "name", label: "Full name(s)", ph: "Jane Doe" },
-  { key: "email", label: "Email(s)", ph: "jane@example.com" },
-  { key: "username", label: "Username(s)", ph: "jdoe_88" },
-  { key: "domain", label: "Domain(s)", ph: "example.com" },
-  { key: "ip", label: "IP address(es)", ph: "8.8.8.8" },
-  { key: "phone", label: "Phone(s)", ph: "+1 555 0100" },
-];
-
-function splitValues(s: string): string[] {
-  return s
-    .split(/[\n,]+/)
-    .map((x) => x.trim())
-    .filter(Boolean);
-}
-
 export default function Home() {
-  const [mode, setMode] = useState<Mode>("text");
-  const [query, setQuery] = useState("");
-  const [form, setForm] = useState<FormState>(EMPTY);
   const [files, setFiles] = useState<File[]>([]);
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<InvestigationResult | null>(null);
+  const [result, setResult] = useState<GeolocateResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  // Gate the submit button's disabled state on mount so SSR HTML and the first
+  // client render agree (both: enabled). Avoids the hydration mismatch a form-
+  // filler extension can otherwise trigger by touching the button pre-hydration.
+  const [mounted, setMounted] = useState(false);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => setMounted(true), []);
+
+  // Mint one object URL per file (not on every render) and revoke them when the
+  // file set changes or the component unmounts — otherwise each render leaks a
+  // fresh blob URL per thumbnail and forces the image to re-decode.
+  const previews = useMemo(() => files.map((f) => URL.createObjectURL(f)), [files]);
+  useEffect(() => () => previews.forEach((u) => URL.revokeObjectURL(u)), [previews]);
+
+  // Clipboard paste anywhere on the page. A React onPaste on the form only fires
+  // when a focusable child has focus — the upload UI has none — so listen on the
+  // window instead.
+  useEffect(() => {
+    function onPaste(e: ClipboardEvent) {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const imgs: File[] = [];
+      for (const it of Array.from(items)) {
+        if (it.kind === "file" && it.type.startsWith("image/")) {
+          const f = it.getAsFile();
+          if (f) imgs.push(f);
+        }
+      }
+      if (imgs.length) {
+        e.preventDefault();
+        addFiles(imgs);
+      }
+    }
+    // Drag/drop anywhere on the page. Must preventDefault on dragover or the
+    // browser just opens the dropped image as a navigation. depth tracks nested
+    // dragenter/leave so the overlay doesn't flicker over child elements.
+    let depth = 0;
+    function onDragEnter(e: DragEvent) {
+      if (!e.dataTransfer?.types.includes("Files")) return;
+      e.preventDefault();
+      depth++;
+      setDragging(true);
+    }
+    function onDragOver(e: DragEvent) {
+      if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+    }
+    function onDragLeave(e: DragEvent) {
+      if (!e.dataTransfer?.types.includes("Files")) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) setDragging(false);
+    }
+    function onDrop(e: DragEvent) {
+      if (!e.dataTransfer) return;
+      e.preventDefault();
+      depth = 0;
+      setDragging(false);
+      addFiles(e.dataTransfer.files);
+    }
+
+    window.addEventListener("paste", onPaste);
+    window.addEventListener("dragenter", onDragEnter);
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("dragleave", onDragLeave);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("paste", onPaste);
+      window.removeEventListener("dragenter", onDragEnter);
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("dragleave", onDragLeave);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, []);
 
   function addFiles(list: FileList | File[] | null | undefined) {
     if (!list) return;
@@ -76,27 +96,18 @@ export default function Home() {
     setFiles((prev) => prev.filter((_, idx) => idx !== i));
   }
 
-  function buildSeeds() {
-    const seeds: { type: EntityType; value: string }[] = [];
-    for (const { key } of FIELDS) {
-      for (const v of splitValues(form[key])) seeds.push({ type: FIELD_TYPE[key], value: v });
-    }
-    return seeds;
-  }
-
   async function run() {
+    if (!files.length) return;
     setLoading(true);
     setError(null);
     setResult(null);
     try {
       const fd = new FormData();
-      if (mode === "text") fd.set("query", query);
-      else fd.set("seeds", JSON.stringify(buildSeeds()));
       for (const f of files) fd.append("images", f, f.name);
-      const res = await fetch("/api/investigate", { method: "POST", body: fd });
+      const res = await fetch("/api/geolocate", { method: "POST", body: fd });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Request failed");
-      setResult(json as InvestigationResult);
+      setResult(json as GeolocateResult);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed");
     } finally {
@@ -104,131 +115,57 @@ export default function Home() {
     }
   }
 
+  const canRun = files.length > 0 && !loading;
+
   return (
-    <main className="mx-auto max-w-5xl px-4 py-8">
-      <header className="mb-5 flex items-baseline justify-between border-b border-border pb-3">
-        <h1 className="text-sm font-semibold tracking-[0.2em] uppercase">
-          OSINT<span className="text-muted">/</span>Directory
-        </h1>
-        <span className="text-[10px] uppercase tracking-widest text-muted">public-source recon</span>
+    <main className="mx-auto w-full max-w-[1700px] px-6 py-10 md:px-12 md:py-14">
+      <header className="mb-10 flex flex-col gap-6 border-b border-border pb-8 md:flex-row md:items-end md:justify-between">
+        <div className="flex items-end gap-4">
+          <span className="hidden h-12 w-12 shrink-0 items-center justify-center rounded-sm border-2 border-accent text-accent md:flex pulse-ring">
+            <span className="block h-2 w-2 rounded-full bg-accent" />
+          </span>
+          <div>
+            <p className="eyebrow mb-1">Forensic Image Recon</p>
+            <h1 className="font-display text-5xl leading-[0.85] text-foreground md:text-7xl">
+              GEO<span className="accent-text">LOCATOR</span>
+            </h1>
+          </div>
+        </div>
+        <p className="max-w-xs text-sm leading-relaxed text-muted md:text-right">
+          Pinpoint where a photo was taken — EXIF GPS · AI visual estimate ·
+          reverse image search · Instagram geo-pivot — fused on one map.
+        </p>
       </header>
 
-      {/* mode switch */}
-      <div className="mb-3 flex gap-1">
-        {(["text", "form"] as Mode[]).map((m) => (
-          <button
-            key={m}
-            onClick={() => setMode(m)}
-            className={`rounded-sm border px-3 py-1 text-[11px] uppercase tracking-wider transition ${
-              mode === m ? "border-foreground text-foreground" : "border-border text-muted hover:text-foreground"
-            }`}
-          >
-            {m === "text" ? "quick text" : "structured form"}
-          </button>
-        ))}
-      </div>
+      {dragging && (
+        <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+          <span className="font-display text-4xl uppercase tracking-widest text-accent md:text-6xl">
+            drop to add
+          </span>
+        </div>
+      )}
 
       <form
-        className={`relative rounded-md border bg-panel transition ${
-          dragging ? "border-foreground ring-1 ring-foreground" : "border-border"
+        className={`reticle relative overflow-hidden rounded-md border-2 bg-panel transition ${
+          dragging ? "border-accent" : "border-border"
         }`}
         onSubmit={(e) => {
           e.preventDefault();
           run();
         }}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragging(true);
-        }}
-        onDragLeave={(e) => {
-          if (e.currentTarget === e.target) setDragging(false);
-        }}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDragging(false);
-          addFiles(e.dataTransfer.files);
-        }}
-        onPaste={(e) => addFiles(e.clipboardData?.files)}
       >
-        {dragging && (
-          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-md bg-black/70 text-xs uppercase tracking-widest text-foreground">
-            drop images to add
-          </div>
-        )}
-        {mode === "text" ? (
-          <textarea
-            suppressHydrationWarning
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") run();
-            }}
-            rows={4}
-            spellCheck={false}
-            placeholder={"jane.doe@example.com   ·   example.com   ·   8.8.8.8   ·   jdoe_88   ·   Jane Doe"}
-            className="w-full resize-y bg-transparent p-3 text-xs leading-relaxed outline-none placeholder:text-muted/50"
-          />
-        ) : (
-          <div className="grid grid-cols-1 gap-px bg-border sm:grid-cols-2">
-            {FIELDS.map(({ key, label, ph }) => (
-              <label key={key} className="block bg-panel p-3">
-                <span className="text-[9px] uppercase tracking-[0.18em] text-muted">{label}</span>
-                <input
-                  suppressHydrationWarning
-                  value={form[key]}
-                  onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-                  placeholder={ph}
-                  spellCheck={false}
-                  className="mt-1 w-full bg-transparent text-xs outline-none placeholder:text-muted/40"
-                />
-              </label>
-            ))}
-            <label className="block bg-panel p-3 sm:col-span-2">
-              <span className="text-[9px] uppercase tracking-[0.18em] text-muted">
-                Notes (not queried)
-              </span>
-              <textarea
-                suppressHydrationWarning
-                value={form.notes}
-                onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
-                rows={2}
-                placeholder="context, case ref, hypotheses…"
-                className="mt-1 w-full resize-y bg-transparent text-xs outline-none placeholder:text-muted/40"
-              />
-            </label>
-          </div>
-        )}
-
-        {files.length > 0 && (
-          <div className="flex flex-wrap gap-2 border-t border-border px-3 py-2">
-            {files.map((f, i) => (
-              <span
-                key={f.name + i}
-                className="group relative flex items-center gap-1.5 rounded-sm border border-border bg-panel-2 py-1 pl-1 pr-2 text-[11px]"
-              >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={URL.createObjectURL(f)}
-                  alt=""
-                  className="h-6 w-6 rounded-[2px] object-cover grayscale"
-                />
-                <span className="max-w-[120px] truncate text-muted">{f.name}</span>
-                <button
-                  type="button"
-                  onClick={() => removeFile(i)}
-                  className="text-muted hover:text-foreground"
-                  aria-label="remove"
-                >
-                  ✕
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
-
-        <div className="flex items-center gap-3 border-t border-border px-3 py-2">
-          <label className="cursor-pointer text-[11px] uppercase tracking-wider text-muted hover:text-foreground">
-            + images / drag · drop · paste
+        {files.length === 0 ? (
+          <label className="flex min-h-[300px] cursor-pointer flex-col items-center justify-center gap-4 p-12 text-center transition hover:bg-panel-2">
+            <span className="font-display text-3xl text-foreground md:text-5xl">
+              drop · paste · choose
+            </span>
+            <span className="max-w-md text-sm leading-relaxed text-muted">
+              Add one or more images. Everything runs free — AI visual estimate
+              needs only an optional vision key.
+            </span>
+            <span className="mt-2 inline-flex items-center gap-2 rounded-sm border border-accent/40 bg-accent/10 px-4 py-2 text-sm uppercase tracking-widest text-accent">
+              select images
+            </span>
             <input
               type="file"
               accept="image/*"
@@ -240,26 +177,66 @@ export default function Home() {
               }}
             />
           </label>
-          <span className="ml-auto text-[10px] text-muted/60">multiple values: comma / newline</span>
+        ) : (
+          <div className="grid grid-cols-2 gap-3 p-5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+            {files.map((f, i) => (
+              <span
+                key={f.name + i}
+                className="group relative overflow-hidden rounded-sm border border-border bg-panel-2"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={previews[i]}
+                  alt=""
+                  className="h-28 w-full object-cover grayscale transition group-hover:grayscale-0"
+                />
+                <span className="absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/90 to-transparent px-2 py-1.5 text-[11px] text-foreground/90">
+                  {f.name}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => removeFile(i)}
+                  className="absolute right-1.5 top-1.5 flex h-6 w-6 items-center justify-center rounded-sm bg-black/70 text-sm text-foreground opacity-0 transition hover:bg-accent hover:text-black group-hover:opacity-100"
+                  aria-label="remove"
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-4 border-t border-border bg-panel-2/50 px-5 py-4">
+          <label className="cursor-pointer text-sm uppercase tracking-wider text-muted transition hover:text-accent">
+            + add · drag · drop · paste
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                addFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+          </label>
+          <span className="ml-auto text-sm text-muted">
+            {files.length ? `${files.length} image${files.length > 1 ? "s" : ""} queued` : "no images"}
+          </span>
           <button
             type="submit"
-            disabled={loading}
-            className="rounded-sm bg-foreground px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-black transition disabled:opacity-25"
+            suppressHydrationWarning
+            disabled={mounted ? !canRun : false}
+            className="font-display rounded-sm bg-accent px-8 py-3 text-xl uppercase tracking-widest text-black transition hover:brightness-110 disabled:cursor-not-allowed disabled:bg-border disabled:text-muted"
           >
-            {loading ? "scanning" : "run"}
+            {loading ? "locating…" : "locate"}
           </button>
         </div>
       </form>
 
-      <p className="mt-2 text-[10px] leading-relaxed text-muted">
-        Authorized use only · free public sources (RDAP · DNS · crt.sh · Gravatar · cert logs ·
-        public profiles) · no login-gated scraping · race/ethnicity & other sensitive traits not
-        inferred.
-      </p>
-
       {error && (
-        <div className="mt-5 rounded-md border border-border bg-panel-2 px-3 py-2 text-xs text-foreground">
-          ✕ {error}
+        <div className="mt-6 flex items-center gap-3 rounded-md border-2 border-accent/50 bg-accent/10 px-5 py-4 text-sm text-foreground">
+          <span className="font-display text-lg text-accent">!</span> {error}
         </div>
       )}
 

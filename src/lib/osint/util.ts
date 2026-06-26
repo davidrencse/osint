@@ -18,20 +18,42 @@ export function entity(
   };
 }
 
-/** Reject garbage entity values (empty, null-MX ".", malformed) before they enter the graph. */
+/** Reject garbage entity values (empty, malformed) before they enter the graph. */
 export function isValidEntity(e: Entity): boolean {
   const v = e.value.trim();
   if (!v || v === "." || v.length > 2048) return false;
-  switch (e.type) {
-    case "domain":
-      return /^(?=.{1,253}$)([a-z0-9](-?[a-z0-9])*\.)+[a-z]{2,}\.?$/i.test(v) && !v.includes("@");
-    case "email":
-      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
-    case "ip":
-      return /^[0-9a-f:.]+$/i.test(v);
-    default:
-      return true;
-  }
+  return true;
+}
+
+/**
+ * Bounded-concurrency runner. Returns a function that queues async work and
+ * never lets more than `max` run at once. Used to throttle the engine's source
+ * fan-out and to keep geocoding within OSM Nominatim's politeness limits.
+ */
+export function createLimiter(max: number) {
+  let active = 0;
+  const queue: Array<() => void> = [];
+  const pump = () => {
+    if (active >= max) return;
+    const run = queue.shift();
+    if (run) {
+      active++;
+      run();
+    }
+  };
+  return function run<T>(fn: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      queue.push(() =>
+        fn()
+          .then(resolve, reject)
+          .finally(() => {
+            active--;
+            pump();
+          }),
+      );
+      pump();
+    });
+  };
 }
 
 const DEFAULT_TIMEOUT = 8000;
@@ -53,7 +75,7 @@ export async function safeFetch(
       signal: ctrl.signal,
       headers: {
         "user-agent":
-          "osint-directory/0.1 (+research; respects-robots; public-sources-only)",
+          "image-geolocator/0.1 (+research; respects-robots; public-sources-only)",
         ...(init.headers || {}),
       },
     });
@@ -75,15 +97,4 @@ export function imageMediaType(name: string): string {
       bmp: "image/bmp",
     }[ext] || "image/jpeg"
   );
-}
-
-export async function md5Hex(input: string): Promise<string> {
-  // Node crypto (server side)
-  const { createHash } = await import("node:crypto");
-  return createHash("md5").update(input).digest("hex");
-}
-
-export async function sha256Hex(input: string): Promise<string> {
-  const { createHash } = await import("node:crypto");
-  return createHash("sha256").update(input).digest("hex");
 }

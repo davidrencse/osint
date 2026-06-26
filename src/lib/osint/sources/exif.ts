@@ -1,4 +1,4 @@
-import type { Source, Finding, Entity } from "../types";
+import type { Source, Entity } from "../types";
 import { entity } from "../util";
 
 const exifSource: Source = {
@@ -12,7 +12,21 @@ const exifSource: Source = {
 
     let meta: Record<string, unknown> | undefined;
     try {
-      meta = (await exifr.parse(buf, true)) as Record<string, unknown> | undefined;
+      // Targeted parse: only the blocks we actually read (EXIF/GPS/IPTC/XMP).
+      // Skipping makerNote/interop/thumbnail avoids the slowest decode paths.
+      meta = (await exifr.parse(buf, {
+        tiff: true,
+        exif: true,
+        gps: true,
+        iptc: true,
+        xmp: true,
+        interop: false,
+        makerNote: false,
+        translateKeys: true,
+        translateValues: true,
+        reviveValues: true,
+        mergeOutput: true,
+      })) as Record<string, unknown> | undefined;
     } catch {
       return [];
     }
@@ -34,7 +48,7 @@ const exifSource: Source = {
       newEntities.push(
         entity("location", `${lat}, ${lon}`, "exif", 0.9, {
           label: "GPS from photo",
-          meta: { lat, lon, map: `https://www.google.com/maps?q=${lat},${lon}` },
+          meta: { lat, lon, radiusKm: 0.03, kind: "gps", map: `https://www.google.com/maps?q=${lat},${lon}` },
         }),
       );
     }

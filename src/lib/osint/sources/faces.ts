@@ -1,118 +1,89 @@
-import type { Source, Finding } from "../types";
+import type { Source, Finding, Severity } from "../types";
 import { analyzeImageJson, visionConfig } from "../vision";
-import { hostImage } from "./reverse";
 
-// Face detection -> reverse search. Locates faces in the uploaded image (via the
-// vision model, no biometric DB), crops each one, hosts the crop, and hands it to
-// existing reverse-image / face-search engines (Google Lens, Yandex, PimEyes,
-// FaceCheck) which run their own matching under their own legal/consent terms.
+// AI face-attribute estimation. Detects visible faces and estimates SOFT
+// biometric attributes (perceived gender, age range, emotion, apparent
+// ethnicity, accessories). Provider-agnostic — same vision backend as geovision.
 //
-// This does NOT perform 1:N biometric identification or maintain any face
-// database. PRIVACY: face crops are uploaded to a public host (catbox); disable
-// with REVERSE_IMAGE_UPLOAD=0.
+// These are probabilistic AI GUESSES, not facts, and are frequently wrong —
+// labelled as such in the output. This estimates attributes only; it does NOT
+// attempt to identify *who* a person is (no name/identity matching).
 
-const q = (s: string) => encodeURIComponent(s);
+const PROMPT = `You are a forensic image analyst. Detect every clearly visible HUMAN FACE in the image and, for each, give your best visual ESTIMATE of soft attributes. These are uncertain guesses from pixels alone — never claim certainty, and do NOT try to identify who the person is (no names/identity).
+For each face estimate:
+- perceivedGender: "male" | "female" | "uncertain"
+- ageRange: a rough bracket like "0-12","13-19","20-29","30-44","45-59","60+"
+- emotion: dominant expression (e.g. neutral, happy, sad, angry, surprised, fearful)
+- apparentEthnicity: broad visual guess (e.g. "East Asian","South Asian","Black","White","Hispanic/Latino","Middle Eastern","uncertain")
+- features: notable visible items (glasses, beard, headwear, mask, etc.)
+- confidence: 0..1 for THIS face's estimates overall
+Respond with ONLY a JSON object, no prose, no code fences:
+{"count":number,"faces":[{"perceivedGender":string,"ageRange":string,"emotion":string,"apparentEthnicity":string,"features":string[],"confidence":number}]}`;
 
-const PROMPT = `Detect every human FACE in this image. Do not identify or name anyone.
-For each face return a tight bounding box in normalized coordinates (0..1, origin top-left).
-Respond with ONLY JSON, no prose, no code fences:
-{"faces":[{"x":number,"y":number,"w":number,"h":number}]}`;
-
-interface FaceBox {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
+interface FaceOut {
+  count?: number;
+  faces?: {
+    perceivedGender?: string;
+    ageRange?: string;
+    emotion?: string;
+    apparentEthnicity?: string;
+    features?: string[];
+    confidence?: number;
+  }[];
 }
 
-function clamp01(n: number): number {
-  return Math.max(0, Math.min(1, n));
-}
+const sevFor = (c: number): Severity => (c >= 0.7 ? "medium" : "low");
 
 const facesSource: Source = {
   id: "faces",
-  label: "Face Detection + Reverse Search",
+  label: "Face Attributes (AI)",
   handles: ["image"],
   requiresKey: "VISION_API_KEY",
   async run(e, ctx) {
     const buf = ctx.images?.[e.value];
     const cfg = visionConfig(ctx.keys);
     if (!buf || !cfg) return [];
+    // Oversized images are downscaled in analyzeImageJson (prepareVisionImage).
 
-    const out = await analyzeImageJson<{ faces?: FaceBox[] }>({
+    const o = await analyzeImageJson<FaceOut>({
       buffer: buf,
       filename: e.value,
       prompt: PROMPT,
       cfg,
       signal: ctx.signal,
     });
-    const faces = (out.faces || []).filter(
-      (f) => typeof f.x === "number" && typeof f.w === "number" && f.w > 0 && f.h > 0,
-    );
 
+    const faces = (o.faces || []).filter((f) => f && (f.perceivedGender || f.ageRange || f.emotion));
     if (!faces.length) {
-      return [{ source: "faces", title: `No faces detected in ${e.value}`, severity: "info" }];
+      return [
+        { source: "faces", title: `No faces detected in ${e.value}`, severity: "info" },
+      ];
     }
 
-    const sharp = (await import("sharp")).default;
-    const meta = await sharp(buf).metadata();
-    const W = meta.width || 0;
-    const H = meta.height || 0;
-    if (!W || !H) return [{ source: "faces", title: `Could not read image dimensions`, severity: "info" }];
+    const conf =
+      faces.reduce((s, f) => s + (typeof f.confidence === "number" ? f.confidence : 0.3), 0) /
+      faces.length;
 
-    const hostingOff = process.env.REVERSE_IMAGE_UPLOAD === "0";
-    const findings: Finding[] = [];
-
-    for (let i = 0; i < faces.length; i++) {
-      const f = faces[i];
-      // expand the box ~30% for context, clamp to image
-      const cx = clamp01(f.x - f.w * 0.15);
-      const cy = clamp01(f.y - f.h * 0.15);
-      const cw = clamp01(f.w * 1.3);
-      const ch = clamp01(f.h * 1.3);
-      const left = Math.floor(cx * W);
-      const top = Math.floor(cy * H);
-      const width = Math.max(1, Math.min(W - left, Math.round(cw * W)));
-      const height = Math.max(1, Math.min(H - top, Math.round(ch * H)));
-
-      let cropUrl: string | null = null;
-      try {
-        const crop = await sharp(buf).extract({ left, top, width, height }).jpeg({ quality: 90 }).toBuffer();
-        if (!hostingOff) cropUrl = await hostImage(crop, `face-${i + 1}.jpg`, ctx.signal);
-      } catch {
-        // crop failed — still report the detection
-      }
-
-      const links = cropUrl
-        ? [
-            { label: "Google Lens", url: `https://lens.google.com/uploadbyurl?url=${q(cropUrl)}` },
-            { label: "Yandex (faces)", url: `https://yandex.com/images/search?rpt=imageview&url=${q(cropUrl)}` },
-            { label: "PimEyes (upload crop)", url: "https://pimeyes.com/en" },
-            { label: "FaceCheck.id (upload crop)", url: "https://facecheck.id/" },
-          ]
-        : [
-            { label: "PimEyes", url: "https://pimeyes.com/en" },
-            { label: "FaceCheck.id", url: "https://facecheck.id/" },
-          ];
-
-      findings.push({
+    return [
+      {
         source: "faces",
-        title: `Face ${i + 1} of ${faces.length} — reverse search`,
-        severity: "low",
-        url: cropUrl || undefined,
-        detail: cropUrl
-          ? "Cropped face hosted for URL-based search. Lens/Yandex run by URL; PimEyes/FaceCheck need a manual upload of the crop."
-          : "Face detected; crop hosting disabled — upload the image to a face-search engine manually.",
+        title: `${faces.length} face${faces.length > 1 ? "s" : ""} analyzed in ${e.value}`,
+        severity: sevFor(conf),
         data: {
-          faceCrop: cropUrl || undefined,
-          box: { x: f.x, y: f.y, w: f.w, h: f.h },
-          links,
-          note: cropUrl ? "Crop uploaded to catbox.moe (public). Set REVERSE_IMAGE_UPLOAD=0 to disable." : undefined,
+          faces: faces.map((f, i) => ({
+            face: i + 1,
+            gender: f.perceivedGender || "uncertain",
+            age: f.ageRange || "?",
+            emotion: f.emotion || "?",
+            ethnicity: f.apparentEthnicity || "uncertain",
+            features: f.features?.length ? f.features.join(", ") : undefined,
+            confidence: typeof f.confidence === "number" ? `${Math.round(f.confidence * 100)}%` : undefined,
+          })),
+          model: cfg.model,
+          note: "AI estimates from pixels — perceived attributes only, often wrong. Not identity, not fact.",
         },
-      });
-    }
-
-    return findings;
+      } as Finding,
+    ];
   },
 };
 
