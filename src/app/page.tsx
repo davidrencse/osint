@@ -101,6 +101,11 @@ export default function Home() {
     setLoading(true);
     setError(null);
     setResult(null);
+    // Warm the map bundle during the (multi-second) analysis wait: maplibre-gl is
+    // a large dynamic chunk MapView only imports once results render. Kicking the
+    // module fetch+parse off now (fire-and-forget, module-cached) means the map
+    // paints near-instantly instead of starting a cold import after the response.
+    void import("maplibre-gl");
     try {
       const fd = new FormData();
       for (const f of files) fd.append("images", f, f.name);

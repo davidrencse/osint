@@ -54,7 +54,8 @@ const SATELLITE_STYLE = {
       attribution: "Elevation © AWS Terrain Tiles",
     },
   },
-  terrain: { source: "terrain-dem", exaggeration: 1.35 },
+  // No static `terrain` here — the 3D mesh is attached on demand (syncTerrain)
+  // only while the camera is tilted, so flat views don't pay to build it.
   layers: [
     { id: "sat", type: "raster" as const, source: "esri-imagery" },
     {
@@ -111,9 +112,34 @@ const STYLE = {
       url: "https://tiles.openfreemap.org/planet",
       attribution: "© OpenStreetMap · OpenFreeMap",
     },
+    // Same free, no-key AWS terrarium DEM the satellite mode uses, so the dark
+    // recon basemap gains real ground relief when tilted/globe-spun.
+    "terrain-dem": {
+      type: "raster-dem" as const,
+      tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
+      encoding: "terrarium" as const,
+      tileSize: 256,
+      maxzoom: 15,
+      attribution: "Elevation © AWS Terrain Tiles",
+    },
   },
+  // Terrain mesh attached on demand (syncTerrain) only when tilted; the hillshade
+  // layer below still renders flat relief off the same DEM source.
   layers: [
     { id: "bg", type: "background" as const, paint: { "background-color": "#1a1a1a" } },
+    // Relief shading from the DEM — makes elevation visible on the flat dark map
+    // (mountains/valleys read as light/shadow) even top-down, not only when tilted.
+    {
+      id: "hillshade",
+      type: "hillshade" as const,
+      source: "terrain-dem",
+      paint: {
+        "hillshade-shadow-color": "#000000",
+        "hillshade-highlight-color": "#5c5c5c",
+        "hillshade-accent-color": "#000000",
+        "hillshade-exaggeration": 0.55,
+      },
+    },
     {
       id: "water",
       type: "fill" as const,
@@ -394,6 +420,22 @@ function addAccuracy(map: any, points: GeoPoint[]) {
   });
 }
 
+const TERRAIN_EXAGGERATION = 1.35;
+
+// Build the 3D terrain mesh (the expensive part) ONLY while the camera is
+// tilted — a flat top-down view gains nothing from a deformed mesh but still
+// pays to compute it. Hillshade relief is a separate 2D layer and keeps working
+// flat. Cheap to call on every pitchend / style load; it no-ops when already in
+// the right state. Requires the "terrain-dem" source to be present in the style.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function syncTerrain(map: any) {
+  if (!map.getSource?.("terrain-dem")) return;
+  const want = map.getPitch() > 1;
+  const has = !!map.getTerrain?.();
+  if (want && !has) map.setTerrain({ source: "terrain-dem", exaggeration: TERRAIN_EXAGGERATION });
+  else if (!want && has) map.setTerrain(null);
+}
+
 const MODES: { id: MapMode; label: string }[] = [
   { id: "recon", label: "◐ Recon" },
   { id: "streets", label: "▦ Streets" },
@@ -458,6 +500,18 @@ export function MapView({ points }: { points: GeoPoint[] }) {
         maxPitch: 85,
         fadeDuration: 0, // skip tile cross-fade for snappier loads
         refreshExpiredTiles: false,
+        // Render CJK/Korean labels with a local font instead of fetching the huge
+        // glyph PBF ranges over the network — faster first paint, far less data.
+        localIdeographFontFamily: "sans-serif",
+        // Don't repeat the world horizontally at low zoom: fewer duplicate tile
+        // fetches and draws for the same ground.
+        renderWorldCopies: false,
+        // Bound the tile cache so long sessions / many pans don't grow GPU+RAM
+        // unbounded (default scales with viewport, no hard ceiling).
+        maxTileCacheSize: 256,
+        // One map, multiple vector layers from one source — skip cross-source
+        // label-collision checks we don't need; saves per-frame CPU.
+        crossSourceCollisions: false,
       });
       if (globeRef.current) map.setProjection({ type: "globe" });
       mapRef.current = map;
@@ -494,8 +548,13 @@ export function MapView({ points }: { points: GeoPoint[] }) {
         setSvMode(false);
       });
 
+      // Attach/detach the terrain mesh as the camera tilts (cheap no-op when
+      // already correct). Covers drag-pitch, easeTo, globe — all end in pitchend.
+      map.on("pitchend", () => syncTerrain(map));
+
       map.on("load", () => {
         addAccuracy(map, points);
+        syncTerrain(map); // satellite opens pre-tilted → build mesh on first paint
 
         // Markers are DOM overlays — they survive setStyle(), so add them once.
         const bounds = new maplibregl.LngLatBounds();
@@ -551,6 +610,7 @@ export function MapView({ points }: { points: GeoPoint[] }) {
     const onData = () => {
       if (!map.isStyleLoaded()) return;
       addAccuracy(map, points);
+      syncTerrain(map); // new style re-added the DEM source — restore mesh if tilted
       map.setProjection({ type: globe ? "globe" : "mercator" }); // keep projection
       map.off("styledata", onData);
     };
@@ -594,7 +654,7 @@ export function MapView({ points }: { points: GeoPoint[] }) {
       ? "Imagery © Esri · Buildings © OpenStreetMap · Elevation © AWS — tilt for 3D"
       : mode === "streets"
         ? "© OpenStreetMap · OpenFreeMap"
-        : "© OpenStreetMap · OpenFreeMap · zoom in for 3D buildings";
+        : "© OpenStreetMap · OpenFreeMap · Elevation © AWS · tilt for 3D terrain";
 
   return (
     <div className="space-y-3">
