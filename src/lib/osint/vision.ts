@@ -29,8 +29,8 @@ const VISION_MAX_DIM = Number(process.env.VISION_MAX_DIM) || 2560;
  * EXIF GPS is read from the ORIGINAL buffer elsewhere, so reprocessing here is
  * fine. Modest images pass through untouched at full fidelity.
  */
-// Five AI sources (geovision, ocr, scene, faces, refine) each prepare the SAME
-// uploaded Buffer. Without memoization that's 5× the sharp decode→resize→sharpen
+// Four AI sources (geovision, scene, faces, refine) each prepare the SAME
+// uploaded Buffer. Without memoization that's 4× the sharp decode→resize→sharpen
 // →JPEG-encode of one photo (the loop can encode several times) plus 5× base64.
 // Sources receive the same Buffer reference from ctx.images, so a WeakMap keyed
 // on the Buffer collapses that to one prepare per image and auto-GCs after the
@@ -66,20 +66,27 @@ async function prepareVisionImageUncached(
   }
 
   // .rotate() bakes in EXIF orientation so the model sees the photo upright.
-  let width = Math.min(VISION_MAX_DIM, longest || VISION_MAX_DIM);
-  for (let q = 90; q >= 45; q -= 12) {
-    try {
-      const out = await sharp(buffer, { failOn: "none" })
-        .rotate()
-        .resize({ width, height: width, fit: "inside", withoutEnlargement: true, kernel: "lanczos3" })
-        .sharpen({ sigma: 0.6 })
+  // Decode → rotate → resize(Lanczos) → sharpen ONCE into raw pixels, then only
+  // the JPEG re-encode varies per quality step. The old loop re-ran the full
+  // decode + resize + sharpen on every iteration (up to 4×); those are the
+  // expensive ops — re-encoding from raw is the only part that needs to repeat.
+  const width = Math.min(VISION_MAX_DIM, longest || VISION_MAX_DIM);
+  try {
+    const { data: raw, info } = await sharp(buffer, { failOn: "none" })
+      .rotate()
+      .resize({ width, height: width, fit: "inside", withoutEnlargement: true, kernel: "lanczos3" })
+      .sharpen({ sigma: 0.6 })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const rawOpts = { raw: { width: info.width, height: info.height, channels: info.channels } };
+    for (let q = 90; q >= 45; q -= 12) {
+      const out = await sharp(raw, rawOpts)
         .jpeg({ quality: q, chromaSubsampling: "4:4:4", mozjpeg: true })
         .toBuffer();
       if (out.length <= VISION_MAX_BYTES) return { data: out, mediaType: "image/jpeg" };
-    } catch {
-      break; // unsupported/corrupt input — fall through to original
     }
-    width = Math.round(width * 0.85);
+  } catch {
+    // unsupported/corrupt input — fall through to the aggressive-shrink last resort
   }
   // Last resort: aggressive shrink; if even decode failed, send original and let
   // the API surface the real error rather than silently dropping the image.
@@ -160,9 +167,11 @@ export async function analyzeImageJson<T>(opts: {
       body: JSON.stringify({
         model: cfg.model,
         temperature: 0.2,
-        // Detailed OCR / multi-face / many-clue responses can exceed 1k tokens;
-        // truncation produces unparseable JSON (= a silently failed detection).
-        max_tokens: 2048,
+        // Rich responses — multi-face attributes, many clues, transcribed text,
+        // and per-feature bounding boxes (regions[]) — readily exceed 2k tokens;
+        // truncation produces unparseable JSON (= a silently failed detection), so
+        // keep generous headroom.
+        max_tokens: 4096,
         messages: [
           {
             role: "user",

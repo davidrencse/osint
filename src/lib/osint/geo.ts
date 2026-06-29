@@ -85,7 +85,9 @@ export async function attachElevation(points: GeoPoint[], signal?: AbortSignal):
     const res = await safeFetch(
       `https://api.open-meteo.com/v1/elevation?latitude=${lat}&longitude=${lon}`,
       { headers: { accept: "application/json" } },
-      7000,
+      // Best-effort enrichment that runs serially at the very end and blocks the
+      // response — keep its worst-case tail short rather than the default long wait.
+      4500,
       signal,
     );
     if (!res.ok) return;
@@ -176,9 +178,32 @@ export function buildGeo(entities: Entity[]): GeoPoint[] {
       let conf = 1;
       for (const v of bySource.values()) conf *= 1 - v;
       conf = Math.min(0.97, 1 - conf);
+
+      // Center: keep a precise fix (GPS / geocoded rep) EXACTLY on its rep — never
+      // blur a hard fix. But an estimate-only cluster is several independent rough
+      // AI guesses of the same place; their confidence/precision-weighted centroid
+      // sits closer to truth than any single model call (averages out per-call
+      // error). Tighter, more-confident guesses pull harder (weight = conf/radius).
+      let lat = c.rep.lat;
+      let lon = c.rep.lon;
+      if (c.rep.kind === "estimate" && c.members.length > 1) {
+        let sw = 0;
+        let slat = 0;
+        let slon = 0;
+        for (const mem of c.members) {
+          const w = mem.confidence / Math.max(mem.radiusKm, 0.05);
+          sw += w;
+          slat += mem.lat * w;
+          slon += mem.lon * w;
+        }
+        if (sw > 0) {
+          lat = slat / sw;
+          lon = slon / sw;
+        }
+      }
       return {
-        lat: c.rep.lat,
-        lon: c.rep.lon,
+        lat,
+        lon,
         label: c.rep.label,
         source: c.rep.source,
         confidence: conf,

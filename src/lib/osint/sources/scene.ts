@@ -52,7 +52,7 @@ const sceneSource: Source = {
     });
 
     if (!o.regionGuessable) {
-      return [{ source: "scene", title: `No regional cues in ${e.value}`, severity: "info" }];
+      return [{ source: "scene", image: e.value, title: `No regional cues in ${e.value}`, severity: "info" }];
     }
 
     const conf = typeof o.confidence === "number" ? o.confidence : 0.25;
@@ -77,6 +77,7 @@ const sceneSource: Source = {
     return [
       {
         source: "scene",
+        image: e.value,
         title: `Scene region: ${place} (${Math.round(conf * 100)}%)`,
         severity: conf >= 0.5 ? "medium" : "low",
         data: {

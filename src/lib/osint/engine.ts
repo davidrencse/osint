@@ -11,7 +11,6 @@ import { entity as makeEntity, isValidEntity, createLimiter } from "./util";
 
 import exif from "./sources/exif";
 import geovision from "./sources/geovision";
-import ocr from "./sources/ocr";
 import scene from "./sources/scene";
 import refine from "./sources/refine";
 import geocode from "./sources/geocode";
@@ -22,13 +21,14 @@ import faces from "./sources/faces";
 // Geolocation runs as layered, independent detectors that fuse in geo.ts, in a
 // coarse → fine cascade:
 //   1. exif      — embedded GPS + IPTC/XMP place tags (metadata)
-//   2. geovision — holistic AI visual estimate + landmarks + camera geometry
-//   3. ocr       — sign/text extraction → geocodable place queries
-//   4. scene     — background architecture/biome/driving-side → region
-//   5. geocode   — resolves named places from layers 1–4 into coordinates
-//   6. refine    — second AI pass seeded with the coarse area → exact spot
+//   2. geovision — holistic AI visual estimate + landmarks + sign/text place
+//                  queries + camera geometry (one vision call; text extraction
+//                  was merged in from the former standalone `ocr` source)
+//   3. scene     — background architecture/biome/driving-side → region
+//   4. geocode   — resolves named places from the layers above into coordinates
+//   5. refine    — second AI pass seeded with the coarse area → exact spot
 // reverse + instagram add corroboration links; faces is attribute-only.
-export const SOURCES: Source[] = [exif, geovision, ocr, scene, refine, geocode, reverse, instagram, faces];
+export const SOURCES: Source[] = [exif, geovision, scene, refine, geocode, reverse, instagram, faces];
 
 // Global cap on concurrent source runs so a multi-image upload doesn't fan out
 // into hundreds of simultaneous outbound fetches.

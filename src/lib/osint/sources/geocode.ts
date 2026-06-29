@@ -1,5 +1,6 @@
 import type { Source, Finding, Entity } from "../types";
 import { entity, safeFetch, createLimiter } from "../util";
+import { haversineKm } from "../geo";
 
 // Free, no-key geocoding via OpenStreetMap Nominatim. Turns text place names
 // (IPTC photo tags, AI landmarks) into map coordinates.
@@ -10,6 +11,23 @@ const COORD_RE = /^\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?/;
 // Nominatim asks for ≤1 request/sec — fanning out many concurrent lookups gets
 // the IP throttled (slower) or blocked. Cap to 1 in-flight across all locations.
 const geocodeLimit = createLimiter(1);
+
+// Process-lifetime cache of resolved queries. Place coordinates are stable, so a
+// query that already hit Nominatim never needs to again — collapses duplicate
+// lookups (the same landmark surfaced by geovision AND a sign query, or repeated
+// uploads of similar photos) from a serialized 1-req/sec network call to a Map
+// read. Keyed by query + a coarse `near`-bias bucket (different bias can pick a
+// different homonym). Bounded so a long-lived server can't grow it unbounded.
+const geocodeCache = new Map<string, NominatimHit | null>();
+const CACHE_MAX = 2000;
+function cacheKey(q: string, near?: { lat: number; lon: number }): string {
+  const bias = near ? `@${near.lat.toFixed(1)},${near.lon.toFixed(1)}` : "";
+  return `${q.trim().toLowerCase()}${bias}`;
+}
+function cacheSet(key: string, val: NominatimHit | null): void {
+  if (geocodeCache.size >= CACHE_MAX) geocodeCache.delete(geocodeCache.keys().next().value!);
+  geocodeCache.set(key, val);
+}
 
 interface NominatimHit {
   lat: string;
@@ -38,25 +56,63 @@ const geocodeSource: Source = {
   handles: ["location"],
   async run(e, ctx) {
     // already has coordinates? nothing to do
-    const m = e.meta as { lat?: number; lon?: number } | undefined;
+    const m = e.meta as
+      | { lat?: number; lon?: number; near?: { lat: number; lon: number } }
+      | undefined;
     if ((m?.lat != null && m?.lon != null) || COORD_RE.test(e.value)) return [];
 
-    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
-      e.value,
-    )}&format=jsonv2&limit=1&addressdetails=0`;
-    // serialize the actual request (politeness); the coord check above already
-    // short-circuited entities that need no network call.
-    const res = await geocodeLimit(() =>
-      safeFetch(url, { headers: { accept: "application/json" } }, 9000, ctx.signal),
-    );
-    if (!res.ok) return [];
-    let hits: NominatimHit[];
-    try {
-      hits = (await res.json()) as NominatimHit[];
-    } catch {
-      return [];
+    const nearRaw = m?.near;
+    const near =
+      nearRaw && Number.isFinite(nearRaw.lat) && Number.isFinite(nearRaw.lon) ? nearRaw : undefined;
+
+    const key = cacheKey(e.value, near);
+    let hit: NominatimHit | null | undefined = geocodeCache.get(key);
+    if (hit === undefined) {
+      // With a proximity bias, ask for several candidates and a viewbox reweight so
+      // we can rule out a far-away homonym; without one, the single importance-top
+      // hit is what we want.
+      let url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
+        e.value,
+      )}&format=jsonv2&limit=${near ? 8 : 1}&addressdetails=0`;
+
+      // Proximity bias: prefer same-named places near the photo's rough coords. A
+      // ~±1.5° box (~165 km) WITHOUT `bounded=1` only reweights ranking — it won't
+      // drop a hit slightly outside.
+      if (near) {
+        const d = 1.5;
+        // viewbox = minLon,maxLat,maxLon,minLat (left,top,right,bottom)
+        url += `&viewbox=${near.lon - d},${near.lat + d},${near.lon + d},${near.lat - d}`;
+      }
+      // serialize the actual request (politeness); the coord check above already
+      // short-circuited entities that need no network call.
+      const res = await geocodeLimit(() =>
+        safeFetch(url, { headers: { accept: "application/json" } }, 9000, ctx.signal),
+      );
+      if (!res.ok) return [];
+      let hits: NominatimHit[];
+      try {
+        hits = (await res.json()) as NominatimHit[];
+      } catch {
+        return [];
+      }
+      // Pick policy. Nominatim returns hits in importance order, so hits[0] is the
+      // most NOTABLE match — the right answer for a famous landmark. The bias must
+      // only RULE OUT a wrong-continent homonym, never demote a famous place to an
+      // obscure-but-nearer one. So with a bias: keep the most-important hit that
+      // also lies near the (rough, AI-estimated) photo location; if none are near,
+      // the estimate is probably off — fall back to the global importance top
+      // rather than snapping to whatever happened to be closest to a bad guess.
+      hit = (() => {
+        if (!hits.length) return null;
+        if (!near) return hits[0];
+        const NEAR_KM = 350; // lenient: the bias is a coarse AI estimate
+        const nearby = hits.find(
+          (h) => haversineKm(near.lat, near.lon, parseFloat(h.lat), parseFloat(h.lon)) <= NEAR_KM,
+        );
+        return nearby ?? hits[0];
+      })();
+      cacheSet(key, hit);
     }
-    const hit = hits[0];
     if (!hit) return [];
 
     const lat = parseFloat(hit.lat);

@@ -1,5 +1,5 @@
-import type { Source, Finding, Entity, Severity } from "../types";
-import { entity } from "../util";
+import type { Source, Finding, Entity, Severity, Box } from "../types";
+import { entity, cleanBox } from "../util";
 import { analyzeImageJson, visionConfig } from "../vision";
 import { destinationPoint, compass8 } from "../geo";
 
@@ -34,10 +34,16 @@ ELONGATED / LINEAR SUBJECTS (bridge, street, pier, wall, railway, river, coastli
 - A shot taken FROM the bridge/street looking along it: onSubject=true, distanceM small, bearing = the line of sight down the structure.
 If the shot is a flat document/screenshot/close-up with no spatial depth, set distanceM null and onSubject false.
 Calibrate confidence to how tight your fix is: ~0.9+ exact street/landmark, ~0.6 right city, ~0.4 right region, ~0.2 only country/continent. Set geolocatable=false ONLY for flat documents/screenshots/plain-studio shots with zero environmental cues.
-Also transcribe ALL readable text (signs, labels) and list any named, searchable places/businesses/landmarks — include faint/background text too.
+Also transcribe ALL readable text (signs, shopfronts, banners, street/transit signs, plates, posters, faint/background text) into visibleText[]. For any text that could pin a real place, build a SEARCHABLE place query combining the business/street/landmark name with the city/area/country you inferred (e.g. "Cafe Central, Vienna") and list these in placeQueries[]. List named, searchable landmarks/businesses in landmarks[].
+Then locate the specific ON-IMAGE features that drove your geolocation and return them in regions[] — the buildings, landmarks, monuments, signs/text, vehicles, and distinctive terrain you actually used as evidence. For each give:
+- label: short name of the thing (e.g. "Gothic spire", "street sign: Rue de Rivoli", "red double-decker bus")
+- kind: one of "building" | "landmark" | "sign" | "vehicle" | "terrain" | "object"
+- box: bounding box as fractions of image size {x,y,w,h}, x,y = TOP-LEFT corner, each 0..1 (x+w ≤ 1, y+h ≤ 1)
+- note: one sentence on what this feature reveals about the location
+Only include features you can actually see and box; omit anything you cannot localize.
 Do NOT identify specific private individuals.
 Respond with ONLY a JSON object, no prose, no code fences:
-{"geolocatable":bool,"city":string|null,"region":string|null,"country":string|null,"lat":number|null,"lon":number|null,"confidence":number,"camera":{"bearingDeg":number|null,"distanceM":number|null,"onSubject":bool,"heightM":number|null,"viewpoint":string|null},"reasoning":string,"clues":string[],"visibleText":string[],"landmarks":string[],"alternatives":[{"place":string,"lat":number|null,"lon":number|null}]}`;
+{"geolocatable":bool,"city":string|null,"region":string|null,"country":string|null,"lat":number|null,"lon":number|null,"confidence":number,"camera":{"bearingDeg":number|null,"distanceM":number|null,"onSubject":bool,"heightM":number|null,"viewpoint":string|null},"reasoning":string,"clues":string[],"visibleText":string[],"placeQueries":string[],"landmarks":string[],"regions":[{"label":string,"kind":string,"box":{"x":number,"y":number,"w":number,"h":number},"note":string}],"alternatives":[{"place":string,"lat":number|null,"lon":number|null}]}`;
 
 interface GeoOut {
   geolocatable?: boolean;
@@ -51,9 +57,13 @@ interface GeoOut {
   reasoning?: string;
   clues?: string[];
   visibleText?: string[];
+  placeQueries?: string[];
   landmarks?: string[];
+  regions?: { label?: string; kind?: string; box?: Partial<Box>; note?: string }[];
   alternatives?: { place: string; lat: number | null; lon: number | null }[];
 }
+
+const REGION_KINDS = new Set(["building", "landmark", "sign", "vehicle", "terrain", "object"]);
 
 const sevFor = (c: number): Severity => (c >= 0.7 ? "high" : c >= 0.4 ? "medium" : "low");
 
@@ -93,12 +103,17 @@ const geovisionSource: Source = {
 
     if (!o.geolocatable) {
       return [
-        { source: "geovision", title: `No visual location cues in ${e.value}`, severity: "info", detail: o.reasoning },
+        { source: "geovision", image: e.value, title: `No visual location cues in ${e.value}`, severity: "info", detail: o.reasoning },
       ];
     }
 
     const conf = typeof o.confidence === "number" ? o.confidence : 0.3;
     const place = [o.city, o.region, o.country].filter(Boolean).join(", ") || "unknown";
+    // The visual-estimate coords, if any — handed to every text entity below as a
+    // geocoding bias (`near`) so ambiguous landmark/sign names resolve to the place
+    // ACTUALLY shown in the photo, not a same-named feature on another continent.
+    const near =
+      typeof o.lat === "number" && typeof o.lon === "number" ? { lat: o.lat, lon: o.lon } : null;
     // accuracy scales with how specific the AI got: street/city < region < country
     const estRadius = o.city ? 15 : o.region ? 80 : 500;
     const entities: Entity[] = [];
@@ -160,7 +175,10 @@ const geovisionSource: Source = {
       } else if (alt?.place && String(alt.place).trim().length > 2) {
         // no coords on the alternative either — let geocode resolve the name
         entities.push(
-          entity("location", String(alt.place).trim(), "geovision", 0.3, { label: "alternative estimate" }),
+          entity("location", String(alt.place).trim(), "geovision", 0.3, {
+            label: "alternative estimate",
+            meta: near ? { near } : undefined,
+          }),
         );
       }
     }
@@ -177,12 +195,37 @@ const geovisionSource: Source = {
         (p) => p && lc.includes(p.toLowerCase()),
       );
       const q = locality && !hasContext ? `${v}, ${locality}` : v;
-      entities.push(entity("location", q, "geovision", 0.6, { label: "landmark in photo" }));
+      entities.push(
+        entity("location", q, "geovision", 0.6, {
+          label: "landmark in photo",
+          meta: near ? { near } : undefined,
+        }),
+      );
+    }
+
+    // Sign/text place queries (formerly the separate `ocr` source — merged here so
+    // one vision call does both the holistic estimate and text extraction). Emit
+    // them under source "ocr" so geo.ts fusion still counts a text-derived geocode
+    // as INDEPENDENT corroboration of the visual estimate, not the same source.
+    const seenQ = new Set<string>();
+    for (const pq of o.placeQueries || []) {
+      const q = String(pq).trim();
+      const lc = q.toLowerCase();
+      if (q.length > 2 && !seenQ.has(lc)) {
+        seenQ.add(lc);
+        entities.push(
+          entity("location", q, "ocr", 0.5, {
+            label: `sign: ${q.slice(0, 40)}`,
+            meta: near ? { near } : undefined,
+          }),
+        );
+      }
     }
 
     return [
       {
         source: "geovision",
+        image: e.value,
         title: `Visual estimate: ${place} (${Math.round(conf * 100)}%)`,
         severity: sevFor(conf),
         url:
@@ -207,6 +250,16 @@ const geovisionSource: Source = {
           clues: o.clues,
           visibleText: o.visibleText,
           landmarks: o.landmarks,
+          // On-image evidence with bounding boxes (best-effort; only well-formed
+          // boxes survive so the client can overlay them on the photo).
+          regions: (o.regions || [])
+            .map((r) => {
+              const box = cleanBox(r.box);
+              if (!box || !r.label) return null;
+              const kind = REGION_KINDS.has(String(r.kind)) ? String(r.kind) : "object";
+              return { label: String(r.label).slice(0, 80), kind, box, note: r.note ? String(r.note) : undefined };
+            })
+            .filter(Boolean),
           alternatives: (o.alternatives || []).map((a) => a.place),
           model: cfg.model,
           note: "AI inference from image content — verify before relying on it.",

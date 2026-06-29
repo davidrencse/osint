@@ -49,6 +49,7 @@ const reverseSource: Source = {
       return [
         {
           source: "reverse-image",
+          image: e.value,
           title: `Reverse search for ${e.value} (manual)`,
           severity: "info",
           detail:
@@ -68,6 +69,7 @@ const reverseSource: Source = {
     return [
       {
         source: "reverse-image",
+        image: e.value,
         title: `Reverse image search ready: ${e.value}`,
         severity: "low",
         url,

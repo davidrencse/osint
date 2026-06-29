@@ -23,6 +23,8 @@ export interface Finding {
   detail?: string;
   url?: string;
   severity?: Severity;
+  /** filename of the uploaded image this finding pertains to (when applicable) */
+  image?: string;
   /** new entities discovered by this finding (fed back into the engine for pivoting) */
   entities?: Entity[];
   /** arbitrary structured payload for the UI */
@@ -46,6 +48,14 @@ export interface Source {
   /** true if it needs an API key that is currently missing -> engine emits a "configure" note */
   requiresKey?: string;
   run(entity: Entity, ctx: SourceContext): Promise<Finding[]>;
+}
+
+/** normalized bounding box on an image: fractions 0..1, (x,y)=top-left corner */
+export interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 /** precision class of a geo point — drives map marker style + accuracy ring */

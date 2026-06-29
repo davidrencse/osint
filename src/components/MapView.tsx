@@ -50,7 +50,12 @@ const SATELLITE_STYLE = {
       tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
       encoding: "terrarium" as const,
       tileSize: 256,
-      maxzoom: 15,
+      // maxzoom 14 (not 15): the render sources (esri / openmaptiles vector) cap at
+      // z14, so past z14 their tiles overscale. MapLibre warns "cannot calculate
+      // elevation if elevation maxzoom > source.maxzoom" when the DEM maxzoom
+      // exceeds the overscaled render tile's canonical zoom — matching at 14 silences
+      // it with no visible relief loss.
+      maxzoom: 14,
       attribution: "Elevation © AWS Terrain Tiles",
     },
   },
@@ -70,7 +75,9 @@ const SATELLITE_STYLE = {
       type: "fill-extrusion" as const,
       source: "openmaptiles",
       "source-layer": "building",
-      minzoom: 14,
+      // building geometry exists in the vector tiles from z13 — start extruding at
+      // 13 (not 14) so 3D buildings appear a full zoom level earlier as you zoom in.
+      minzoom: 13,
       paint: {
         "fill-extrusion-color": [
           "interpolate",
@@ -114,17 +121,28 @@ const STYLE = {
     },
     // Same free, no-key AWS terrarium DEM the satellite mode uses, so the dark
     // recon basemap gains real ground relief when tilted/globe-spun.
+    // TWO separate DEM sources on purpose: MapLibre warns if one raster-dem source
+    // backs both a hillshade layer and the 3D terrain mesh ("use two separate
+    // sources to improve rendering quality"). `hillshade-dem` feeds the 2D relief
+    // layer; `terrain-dem` feeds setTerrain (syncTerrain). Same tiles, HTTP-cached.
+    "hillshade-dem": {
+      type: "raster-dem" as const,
+      tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
+      encoding: "terrarium" as const,
+      tileSize: 256,
+      maxzoom: 14,
+      attribution: "Elevation © AWS Terrain Tiles",
+    },
     "terrain-dem": {
       type: "raster-dem" as const,
       tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
       encoding: "terrarium" as const,
       tileSize: 256,
-      maxzoom: 15,
-      attribution: "Elevation © AWS Terrain Tiles",
+      maxzoom: 14, // match render-source maxzoom (see satellite terrain-dem note)
     },
   },
   // Terrain mesh attached on demand (syncTerrain) only when tilted; the hillshade
-  // layer below still renders flat relief off the same DEM source.
+  // layer below renders flat relief off the separate `hillshade-dem` source.
   layers: [
     { id: "bg", type: "background" as const, paint: { "background-color": "#1a1a1a" } },
     // Relief shading from the DEM — makes elevation visible on the flat dark map
@@ -132,7 +150,7 @@ const STYLE = {
     {
       id: "hillshade",
       type: "hillshade" as const,
-      source: "terrain-dem",
+      source: "hillshade-dem",
       paint: {
         "hillshade-shadow-color": "#000000",
         "hillshade-highlight-color": "#5c5c5c",
@@ -163,7 +181,9 @@ const STYLE = {
       type: "fill-extrusion" as const,
       source: "openmaptiles",
       "source-layer": "building",
-      minzoom: 14,
+      // building geometry exists in the vector tiles from z13 — start extruding at
+      // 13 (not 14) so 3D buildings appear a full zoom level earlier as you zoom in.
+      minzoom: 13,
       paint: {
         "fill-extrusion-color": [
           "interpolate",
@@ -490,6 +510,13 @@ export function MapView({ points }: { points: GeoPoint[] }) {
       const maplibregl = (await import("maplibre-gl")).default;
       if (cancelled || !ref.current) return;
 
+      // Zooming into a fresh area needs many tiles at once (vector basemap +
+      // building geometry + DEM + imagery). The default cap of 16 in-flight tile
+      // requests bottlenecks that burst on HTTP/2 hosts (openfreemap/esri/S3 all
+      // multiplex), so the new viewport — and its 3D buildings — fills in slower
+      // than the network allows. Raise it to saturate the connection on zoom.
+      maplibregl.setMaxParallelImageRequests(32);
+
       const map = new maplibregl.Map({
         container: ref.current,
         style: styleFor(modeRef.current),
@@ -638,12 +665,12 @@ export function MapView({ points }: { points: GeoPoint[] }) {
 
   if (!points.length) {
     return (
-      <div className="flex min-h-[300px] flex-col items-center justify-center gap-3 rounded-md border-2 border-dashed border-border bg-panel p-8 text-center">
-        <span className="font-display text-2xl text-muted">no fix</span>
+      <div className="flex min-h-[320px] flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border bg-panel p-10 text-center">
+        <span className="font-display text-4xl italic text-muted">No fix</span>
         <p className="max-w-md text-sm leading-relaxed text-muted">
-          No location found in this image. Geo points come from EXIF GPS, AI
-          visual estimates from pixel content, reverse image search, and geocoded
-          place names / landmarks.
+          Couldn&apos;t place this image. Fixes come from embedded GPS, AI
+          estimates of the pixel content, reverse image search, and geocoded place
+          names — this photo gave none of them enough to go on.
         </p>
       </div>
     );
@@ -667,15 +694,13 @@ export function MapView({ points }: { points: GeoPoint[] }) {
       />
 
       {/* basemap mode switcher — segmented control */}
-      <div className="absolute left-4 top-4 z-10 flex overflow-hidden rounded-sm border border-border bg-black/80 backdrop-blur">
+      <div className="absolute left-4 top-4 z-10 flex overflow-hidden rounded-sm border border-border bg-black/75 backdrop-blur">
         {MODES.map((m) => (
           <button
             key={m.id}
             onClick={() => changeMode(m.id)}
-            className={`px-4 py-2 text-sm uppercase tracking-wider transition ${
-              mode === m.id
-                ? "bg-accent text-black"
-                : "text-foreground hover:text-accent"
+            className={`chip px-3.5 py-2 transition ${
+              mode === m.id ? "bg-accent text-black" : "text-foreground hover:text-accent"
             }`}
           >
             {m.label}
@@ -683,29 +708,29 @@ export function MapView({ points }: { points: GeoPoint[] }) {
         ))}
       </div>
 
-      <div className="absolute left-4 top-16 z-10 flex gap-2">
+      <div className="absolute left-4 top-[3.65rem] z-10 flex gap-2">
         <button
           onClick={toggle}
-          className="rounded-sm border border-border bg-black/80 px-4 py-2 text-sm uppercase tracking-wider text-foreground backdrop-blur transition hover:border-accent hover:text-accent"
+          className="chip rounded-sm border border-border bg-black/75 px-3.5 py-2 text-foreground backdrop-blur transition hover:border-accent hover:text-accent"
         >
-          {globe ? "▣ flatten (2D)" : "◉ globe (3D)"}
+          {globe ? "▣ Flat 2D" : "◉ Globe 3D"}
         </button>
         <button
           onClick={flyToFirst}
-          className="rounded-sm border border-border bg-black/80 px-4 py-2 text-sm uppercase tracking-wider text-foreground backdrop-blur transition hover:border-accent hover:text-accent"
+          className="chip rounded-sm border border-border bg-black/75 px-3.5 py-2 text-foreground backdrop-blur transition hover:border-accent hover:text-accent"
         >
-          ⛶ zoom in
+          ⛶ Zoom in
         </button>
         <button
           onClick={() => setSvMode((v) => !v)}
           title="Toggle, then click anywhere on the map to open Google Street View there"
-          className={`rounded-sm border px-4 py-2 text-sm uppercase tracking-wider backdrop-blur transition ${
+          className={`chip rounded-sm border px-3.5 py-2 backdrop-blur transition ${
             svMode
               ? "border-accent bg-accent text-black"
-              : "border-border bg-black/80 text-foreground hover:border-accent hover:text-accent"
+              : "border-border bg-black/75 text-foreground hover:border-accent hover:text-accent"
           }`}
         >
-          {svMode ? "◎ click a street…" : "◎ street view"}
+          {svMode ? "◎ Click a street…" : "◎ Street view"}
         </button>
       </div>
 
@@ -740,7 +765,7 @@ export function MapView({ points }: { points: GeoPoint[] }) {
               href={streetViewUrl(p.lat, p.lon)}
               target="_blank"
               rel="noreferrer"
-              className="rounded-sm border border-accent/50 px-3 py-1 text-sm uppercase tracking-wider text-accent transition hover:bg-accent hover:text-black"
+              className="chip rounded-sm border border-accent/50 px-3 py-1 text-accent transition hover:bg-accent hover:text-black"
             >
               Street View
             </a>
@@ -748,7 +773,7 @@ export function MapView({ points }: { points: GeoPoint[] }) {
               href={dir}
               target="_blank"
               rel="noreferrer"
-              className="font-display rounded-sm bg-accent px-3 py-1 text-sm uppercase tracking-wider text-black transition hover:brightness-110"
+              className="chip rounded-sm bg-accent px-3 py-1 text-black transition hover:brightness-110"
             >
               Directions →
             </a>

@@ -1,4 +1,5 @@
-import type { Source, Finding, Severity } from "../types";
+import type { Source, Finding, Severity, Box } from "../types";
+import { cleanBox } from "../util";
 import { analyzeImageJson, visionConfig } from "../vision";
 
 // AI face-attribute estimation. Detects visible faces and estimates SOFT
@@ -11,6 +12,7 @@ import { analyzeImageJson, visionConfig } from "../vision";
 
 const PROMPT = `You are a forensic image analyst. Detect every clearly visible HUMAN FACE in the image and, for each, give your best visual ESTIMATE of soft attributes. These are uncertain guesses from pixels alone — never claim certainty, and do NOT try to identify who the person is (no names/identity).
 For each face estimate:
+- box: the face's bounding box as fractions of image size: {x,y,w,h} where x,y is the TOP-LEFT corner and w,h the width/height, each 0..1 (x+w ≤ 1, y+h ≤ 1). Be tight around the face.
 - perceivedGender: "male" | "female" | "uncertain"
 - ageRange: a rough bracket like "0-12","13-19","20-29","30-44","45-59","60+"
 - emotion: dominant expression (e.g. neutral, happy, sad, angry, surprised, fearful)
@@ -18,11 +20,12 @@ For each face estimate:
 - features: notable visible items (glasses, beard, headwear, mask, etc.)
 - confidence: 0..1 for THIS face's estimates overall
 Respond with ONLY a JSON object, no prose, no code fences:
-{"count":number,"faces":[{"perceivedGender":string,"ageRange":string,"emotion":string,"apparentEthnicity":string,"features":string[],"confidence":number}]}`;
+{"count":number,"faces":[{"box":{"x":number,"y":number,"w":number,"h":number},"perceivedGender":string,"ageRange":string,"emotion":string,"apparentEthnicity":string,"features":string[],"confidence":number}]}`;
 
 interface FaceOut {
   count?: number;
   faces?: {
+    box?: Partial<Box>;
     perceivedGender?: string;
     ageRange?: string;
     emotion?: string;
@@ -56,7 +59,7 @@ const facesSource: Source = {
     const faces = (o.faces || []).filter((f) => f && (f.perceivedGender || f.ageRange || f.emotion));
     if (!faces.length) {
       return [
-        { source: "faces", title: `No faces detected in ${e.value}`, severity: "info" },
+        { source: "faces", image: e.value, title: `No faces detected in ${e.value}`, severity: "info" },
       ];
     }
 
@@ -67,11 +70,13 @@ const facesSource: Source = {
     return [
       {
         source: "faces",
+        image: e.value,
         title: `${faces.length} face${faces.length > 1 ? "s" : ""} analyzed in ${e.value}`,
         severity: sevFor(conf),
         data: {
           faces: faces.map((f, i) => ({
             face: i + 1,
+            box: cleanBox(f.box),
             gender: f.perceivedGender || "uncertain",
             age: f.ageRange || "?",
             emotion: f.emotion || "?",

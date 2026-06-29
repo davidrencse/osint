@@ -1,5 +1,6 @@
 import type { Source, Entity } from "../types";
 import { entity } from "../util";
+import { compass8 } from "../geo";
 
 const exifSource: Source = {
   id: "exif",
@@ -34,6 +35,7 @@ const exifSource: Source = {
       return [
         {
           source: "exif",
+          image: e.value,
           title: `No EXIF metadata in ${e.value}`,
           severity: "info",
           detail: "Image carries no embedded metadata (may have been stripped).",
@@ -44,11 +46,27 @@ const exifSource: Source = {
     const newEntities: Entity[] = [];
     const lat = meta.latitude as number | undefined;
     const lon = meta.longitude as number | undefined;
+    // Ground-truth camera heading: GPSImgDirection is the compass bearing the lens
+    // pointed when the shutter fired (GPSImgDirectionRef = T true / M magnetic).
+    // This is a MEASURED bearing — strictly better than the AI's perspective-guess
+    // in geovision — so surface it directly.
+    const imgDir = meta.GPSImgDirection as number | undefined;
+    const dirRef = (meta.GPSImgDirectionRef as string | undefined) === "M" ? "magnetic" : "true";
+    const altitude = meta.GPSAltitude as number | undefined;
     if (lat != null && lon != null) {
+      const bearingNote =
+        typeof imgDir === "number" ? ` · facing ${compass8(imgDir)} (${Math.round(imgDir)}°)` : "";
       newEntities.push(
         entity("location", `${lat}, ${lon}`, "exif", 0.9, {
-          label: "GPS from photo",
-          meta: { lat, lon, radiusKm: 0.03, kind: "gps", map: `https://www.google.com/maps?q=${lat},${lon}` },
+          label: `GPS from photo${bearingNote}`,
+          meta: {
+            lat,
+            lon,
+            radiusKm: 0.03,
+            kind: "gps",
+            map: `https://www.google.com/maps?q=${lat},${lon}`,
+            ...(typeof imgDir === "number" ? { bearingDeg: imgDir } : {}),
+          },
         }),
       );
     }
@@ -82,10 +100,16 @@ const exifSource: Source = {
     return [
       {
         source: "exif",
+        image: e.value,
         title: `EXIF metadata for ${e.value}`,
         severity: lat != null || placeText ? "medium" : "low",
         data: {
           gps: lat != null ? { lat, lon, map: `https://www.google.com/maps?q=${lat},${lon}` } : undefined,
+          cameraBearing:
+            typeof imgDir === "number"
+              ? `${compass8(imgDir)} ${Math.round(imgDir)}° (${dirRef})`
+              : undefined,
+          altitude: typeof altitude === "number" ? `${Math.round(altitude)} m` : undefined,
           place: placeText || undefined,
           camera: camera || undefined,
           software: sw,

@@ -124,35 +124,34 @@ export default function Home() {
 
   return (
     <main className="mx-auto w-full max-w-[1700px] px-6 py-10 md:px-12 md:py-14">
-      <header className="mb-10 flex flex-col gap-6 border-b border-border pb-8 md:flex-row md:items-end md:justify-between">
-        <div className="flex items-end gap-4">
-          <span className="hidden h-12 w-12 shrink-0 items-center justify-center rounded-sm border-2 border-accent text-accent md:flex pulse-ring">
-            <span className="block h-2 w-2 rounded-full bg-accent" />
-          </span>
-          <div>
-            <p className="eyebrow mb-1">Forensic Image Recon</p>
-            <h1 className="font-display text-5xl leading-[0.85] text-foreground md:text-7xl">
-              GEO<span className="accent-text">LOCATOR</span>
-            </h1>
-          </div>
+      <header className="mb-12 border-b border-border pb-9">
+        <div className="mb-5 flex items-center justify-between">
+          <p className="eyebrow">Forensic Image Geolocation</p>
+          <p className="eyebrow hidden sm:block">No keys required · Runs free</p>
         </div>
-        <p className="max-w-xs text-sm leading-relaxed text-muted md:text-right">
-          Pinpoint where a photo was taken — EXIF GPS · AI visual estimate ·
-          reverse image search · Instagram geo-pivot — fused on one map.
-        </p>
+        <div className="flex flex-col gap-7 md:flex-row md:items-end md:justify-between">
+          <h1 className="font-display text-6xl leading-[0.9] tracking-tight text-foreground md:text-8xl">
+            Geo<span className="font-display-italic accent-text">locator</span>
+          </h1>
+          <p className="max-w-sm text-[0.95rem] leading-relaxed text-muted md:text-right">
+            Find where a photo was taken. It reads embedded GPS, estimates the
+            place from pixel content with AI, reverse-searches the web, and fuses
+            every signal onto a single map.
+          </p>
+        </div>
       </header>
 
       {dragging && (
-        <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
-          <span className="font-display text-4xl uppercase tracking-widest text-accent md:text-6xl">
-            drop to add
+        <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm">
+          <span className="font-display text-5xl italic text-accent md:text-7xl">
+            Drop to add
           </span>
         </div>
       )}
 
       <form
-        className={`reticle relative overflow-hidden rounded-md border-2 bg-panel transition ${
-          dragging ? "border-accent" : "border-border"
+        className={`relative overflow-hidden rounded-lg border bg-panel transition ${
+          dragging ? "border-accent shadow-[0_0_0_1px_var(--accent)]" : "border-border"
         }`}
         onSubmit={(e) => {
           e.preventDefault();
@@ -160,16 +159,16 @@ export default function Home() {
         }}
       >
         {files.length === 0 ? (
-          <label className="flex min-h-[300px] cursor-pointer flex-col items-center justify-center gap-4 p-12 text-center transition hover:bg-panel-2">
-            <span className="font-display text-3xl text-foreground md:text-5xl">
-              drop · paste · choose
+          <label className="group flex min-h-[320px] cursor-pointer flex-col items-center justify-center gap-4 p-12 text-center transition hover:bg-panel-2">
+            <span className="font-display text-4xl text-foreground md:text-6xl">
+              Drop a photo to <span className="font-display-italic accent-text">locate</span> it
             </span>
-            <span className="max-w-md text-sm leading-relaxed text-muted">
-              Add one or more images. Everything runs free — AI visual estimate
-              needs only an optional vision key.
+            <span className="max-w-md text-[0.95rem] leading-relaxed text-muted">
+              Drag in, paste, or choose one or more images. Everything runs free —
+              the AI pixel estimate just needs an optional vision API key.
             </span>
-            <span className="mt-2 inline-flex items-center gap-2 rounded-sm border border-accent/40 bg-accent/10 px-4 py-2 text-sm uppercase tracking-widest text-accent">
-              select images
+            <span className="chip mt-2 inline-flex items-center gap-2 rounded-sm border border-accent/40 bg-accent-soft px-5 py-2.5 text-accent transition group-hover:bg-accent group-hover:text-black">
+              Choose images
             </span>
             <input
               type="file"
@@ -211,9 +210,9 @@ export default function Home() {
           </div>
         )}
 
-        <div className="flex flex-wrap items-center gap-4 border-t border-border bg-panel-2/50 px-5 py-4">
-          <label className="cursor-pointer text-sm uppercase tracking-wider text-muted transition hover:text-accent">
-            + add · drag · drop · paste
+        <div className="flex flex-wrap items-center gap-4 border-t border-border bg-panel-2/40 px-5 py-4">
+          <label className="chip cursor-pointer text-muted transition hover:text-accent">
+            + Add more
             <input
               type="file"
               accept="image/*"
@@ -226,15 +225,20 @@ export default function Home() {
             />
           </label>
           <span className="ml-auto text-sm text-muted">
-            {files.length ? `${files.length} image${files.length > 1 ? "s" : ""} queued` : "no images"}
+            {files.length
+              ? `${files.length} image${files.length > 1 ? "s" : ""} ready`
+              : "No images yet"}
           </span>
           <button
             type="submit"
             suppressHydrationWarning
             disabled={mounted ? !canRun : false}
-            className="font-display rounded-sm bg-accent px-8 py-3 text-xl uppercase tracking-widest text-black transition hover:brightness-110 disabled:cursor-not-allowed disabled:bg-border disabled:text-muted"
+            className="chip group relative overflow-hidden rounded-sm bg-accent px-9 py-3.5 text-sm font-semibold text-black transition hover:brightness-110 disabled:cursor-not-allowed disabled:bg-border disabled:text-muted"
           >
-            {loading ? "locating…" : "locate"}
+            <span className="relative z-10">{loading ? "Locating…" : "Locate"}</span>
+            {!loading && canRun && (
+              <span className="pointer-events-none absolute inset-y-0 -left-full w-1/3 skew-x-12 bg-white/30 [animation:sheen_2.6s_ease-in-out_infinite]" />
+            )}
           </button>
         </div>
       </form>
@@ -245,7 +249,12 @@ export default function Home() {
         </div>
       )}
 
-      {result && <Results result={result} />}
+      {result && (
+        <Results
+          result={result}
+          images={Object.fromEntries(files.map((f, i) => [f.name, previews[i]]))}
+        />
+      )}
     </main>
   );
 }

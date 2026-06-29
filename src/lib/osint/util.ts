@@ -1,4 +1,19 @@
-import type { Entity, EntityType } from "./types";
+import type { Box, Entity, EntityType } from "./types";
+
+/**
+ * Validate an AI-returned bounding box: all four corners must be finite, the box
+ * must have positive size and sit (roughly) within the image. Clamps into [0,1]
+ * so an overlay never escapes the frame. Returns undefined for a junk box so the
+ * caller can simply drop it (no overlay) rather than render garbage.
+ */
+export function cleanBox(b: Partial<Box> | undefined): Box | undefined {
+  if (!b) return undefined;
+  const { x, y, w, h } = b;
+  if ([x, y, w, h].some((n) => typeof n !== "number" || !Number.isFinite(n))) return undefined;
+  if (w! <= 0 || h! <= 0 || x! < -0.05 || y! < -0.05 || x! > 1.05 || y! > 1.05) return undefined;
+  const clamp = (n: number) => Math.max(0, Math.min(1, n));
+  return { x: clamp(x!), y: clamp(y!), w: clamp(w!), h: clamp(h!) };
+}
 
 export function entity(
   type: EntityType,

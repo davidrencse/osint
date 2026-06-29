@@ -79,6 +79,7 @@ const refineSource: Source = {
       return [
         {
           source: "refine",
+          image: m.image,
           title: `Could not sharpen ${area} beyond the area estimate`,
           severity: "info",
           detail: o.reasoning,
@@ -112,6 +113,7 @@ const refineSource: Source = {
     return [
       {
         source: "refine",
+        image: m.image,
         title: `Pinpointed: ${label} (${Math.round(conf * 100)}%)`,
         severity: conf >= 0.7 ? "high" : "medium",
         url: `https://www.google.com/maps?q=${o.lat},${o.lon}`,
